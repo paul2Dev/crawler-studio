@@ -1,0 +1,634 @@
+<!doctype html>
+<html lang="ro">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Crawler Studio</title>
+    <style>
+        :root {
+            --bg: #f4efe6;
+            --panel: #fffdfa;
+            --line: #ddd4c6;
+            --ink: #1f1d1a;
+            --muted: #6a665f;
+            --brand: #0f766e;
+            --brand-2: #115e59;
+            --danger: #991b1b;
+            --warn: #92400e;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+            color: var(--ink);
+            background:
+                radial-gradient(circle at 15% 10%, #fde68a 0%, transparent 28%),
+                radial-gradient(circle at 90% 90%, #a7f3d0 0%, transparent 36%),
+                var(--bg);
+        }
+
+        main {
+            width: min(1040px, 94vw);
+            margin: 24px auto;
+            display: grid;
+            gap: 16px;
+            animation: in .45s ease;
+        }
+
+        .card {
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            padding: 18px;
+            box-shadow: 0 16px 30px rgba(17, 24, 39, .06);
+        }
+
+        h1 {
+            margin: 0 0 6px;
+            font-size: clamp(1.45rem, 2.8vw, 2.15rem);
+        }
+
+        p {
+            margin: 0;
+            color: var(--muted);
+            line-height: 1.45;
+        }
+
+        form {
+            margin-top: 14px;
+            display: grid;
+            gap: 12px;
+        }
+
+        .grid {
+            display: grid;
+            gap: 10px;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        label {
+            display: grid;
+            gap: 6px;
+            font-size: 0.93rem;
+        }
+
+        input[type="url"],
+        input[type="number"] {
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 10px 12px;
+            font-size: 0.96rem;
+            background: #fff;
+            color: var(--ink);
+        }
+
+        .checks {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .checks label {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.92rem;
+        }
+
+        button {
+            width: fit-content;
+            border: 0;
+            border-radius: 12px;
+            padding: 11px 14px;
+            background: linear-gradient(120deg, var(--brand), var(--brand-2));
+            color: #fff;
+            font-weight: 700;
+            cursor: pointer;
+            transition: transform .15s ease, box-shadow .2s ease;
+        }
+
+        button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 8px 18px rgba(15, 118, 110, .25);
+        }
+
+        .status {
+            margin-bottom: 10px;
+            font-size: .96rem;
+            color: var(--muted);
+        }
+
+        .result {
+            min-height: 22px;
+            margin-bottom: 10px;
+        }
+
+        .stats {
+            margin: 10px 0 12px;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            background: #f9f7f2;
+            padding: 10px;
+            font-size: .91rem;
+            color: #333;
+            display: none;
+        }
+
+        .hint {
+            margin-top: -2px;
+            font-size: .82rem;
+            color: #5f5a52;
+        }
+
+        .mode-badge {
+            display: inline-block;
+            margin-left: 6px;
+            padding: 2px 8px;
+            border-radius: 999px;
+            border: 1px solid #b6b6b6;
+            background: #f4f4f4;
+            color: #595959;
+            font-size: .74rem;
+            font-weight: 700;
+            letter-spacing: .2px;
+            vertical-align: middle;
+        }
+
+        .mode-badge.active {
+            border-color: #80c7b4;
+            background: #e9fff7;
+            color: #0f6b53;
+        }
+
+        .saved {
+            margin-top: 12px;
+            border-top: 1px dashed #dbcdb7;
+            padding-top: 12px;
+        }
+
+        .saved h3 {
+            margin: 0 0 8px;
+            font-size: 1rem;
+        }
+
+        .saved ul {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: grid;
+            gap: 6px;
+            max-height: 180px;
+            overflow: auto;
+        }
+
+        .saved li {
+            font-size: .9rem;
+            color: #433f39;
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .missing-index {
+            color: #8a5a1c;
+            font-size: .8rem;
+            padding: 2px 6px;
+            border: 1px solid #e7c58f;
+            border-radius: 999px;
+            background: #fff6e8;
+        }
+
+        .run-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .delete-btn {
+            border: 1px solid #d8a2a2;
+            background: #fff7f7;
+            color: #8d1f1f;
+            border-radius: 8px;
+            padding: 4px 8px;
+            font-size: .78rem;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        .delete-btn:hover {
+            background: #ffeaea;
+        }
+
+        .actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .ghost {
+            background: #fff;
+            color: #0f766e;
+            border: 1px solid #79b8b3;
+        }
+
+        .logs {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            max-height: 340px;
+            overflow: auto;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            background: #faf8f3;
+        }
+
+        .logs li {
+            padding: 8px 10px;
+            border-bottom: 1px dashed #e9dfd0;
+            font-size: .88rem;
+            font-family: Consolas, "Courier New", monospace;
+        }
+
+        .logs li:last-child {
+            border-bottom: 0;
+        }
+
+        .logs .warn {
+            color: var(--warn);
+        }
+
+        .logs .error {
+            color: var(--danger);
+        }
+
+        a {
+            color: #9a3412;
+        }
+
+        @keyframes in {
+            from {
+                opacity: 0;
+                transform: translateY(8px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @media (max-width: 760px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+
+            main {
+                margin: 16px auto;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <main>
+        <section class="card">
+            <h1>Crawler Studio</h1>
+            <p>Introdu site-ul, porneste crawler-ul si descarca local pagini + asset-uri. Setarile implicite sunt
+                conservatoare pentru a reduce riscul de blocare.</p>
+
+            <form id="crawl-form">
+                <label>
+                    URL website
+                    <input id="targetUrl" type="url" placeholder="https://example.com" required />
+                </label>
+
+                <div class="grid">
+                    <label>Max pagini<input id="maxPages" type="number" min="1" max="2000" value="150" /></label>
+                    <label>Max depth<input id="maxDepth" type="number" min="1" max="12" value="3" /></label>
+                    <label title="Sweetspot recomandat: 700-1500ms. Pentru site-uri sensibile: 1500-4000ms.">Delay minim
+                        (ms)<input id="delayMinMs" type="number" min="700" max="10000" value="700" /></label>
+                    <label title="Pastreaza un jitter real intre min si max (cel putin 300ms).">Delay maxim (ms)<input
+                            id="delayMaxMs" type="number" min="1500" max="15000" value="1500" /></label>
+                </div>
+                <div class="hint">Prag minim fortat: Delay minim >= 700ms, Delay maxim >= 1500ms.</div>
+
+                <div class="checks">
+                    <label><input id="respectRobots" type="checkbox" checked />Respecta robots.txt</label>
+                    <label><input id="saveExternalAssets" type="checkbox" />Include asset-uri externe</label>
+                    <label><input id="singlePage" type="checkbox" />Doar pagina curenta (fara crawl linkuri)<span
+                            id="singlePageBadge" class="mode-badge">INACTIVE</span></label>
+                </div>
+
+                <div class="actions">
+                    <button id="crawlBtn" type="submit">Start Crawl</button>
+                    <button id="dryRunBtn" type="button" class="ghost">Dry Run Statistici</button>
+                    <button id="applyRecBtn" type="button" class="ghost" style="display:none;">Aplica
+                        recomandari</button>
+                    <button id="stopBtn" type="button" class="ghost"
+                        style="display:none; border-color:#d29d9d; color:#8d1f1f;">Stop job activ</button>
+                </div>
+            </form>
+        </section>
+
+        <section class="card">
+            <div class="status" id="status">Niciun job activ.</div>
+            <div class="result" id="result"></div>
+            <div class="stats" id="dryStats"></div>
+            <ul class="logs" id="logs"></ul>
+            <div class="saved">
+                <h3>Arhive salvate</h3>
+                <ul id="savedRuns"></ul>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        const form = document.getElementById('crawl-form');
+        const dryRunBtn = document.getElementById('dryRunBtn');
+        const applyRecBtn = document.getElementById('applyRecBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const statusEl = document.getElementById('status');
+        const resultEl = document.getElementById('result');
+        const dryStatsEl = document.getElementById('dryStats');
+        const logsEl = document.getElementById('logs');
+        const savedRunsEl = document.getElementById('savedRuns');
+        const delayMinInput = document.getElementById('delayMinMs');
+        const delayMaxInput = document.getElementById('delayMaxMs');
+        const singlePageInput = document.getElementById('singlePage');
+        const singlePageBadge = document.getElementById('singlePageBadge');
+        let latestRecommendations = null;
+
+        const CRAWL_DELAY_MIN_RECOMMENDED = 700;
+        const CRAWL_DELAY_MAX_RECOMMENDED = 1500;
+
+        function validateCrawlDelays(min, max) {
+            if (!Number.isFinite(min) || !Number.isFinite(max)) {
+                return 'Delay minim si delay maxim trebuie sa fie numere valide.';
+            }
+            if (min < CRAWL_DELAY_MIN_RECOMMENDED) {
+                return `Delay minim trebuie sa fie cel putin ${CRAWL_DELAY_MIN_RECOMMENDED}ms.`;
+            }
+            if (max < CRAWL_DELAY_MAX_RECOMMENDED) {
+                return `Delay maxim trebuie sa fie cel putin ${CRAWL_DELAY_MAX_RECOMMENDED}ms.`;
+            }
+            if (max < min) {
+                return 'Delay maxim nu poate fi mai mic decat delay minim.';
+            }
+            return null;
+        }
+
+        function payloadFromForm() {
+            return {
+                targetUrl: document.getElementById('targetUrl').value.trim(),
+                maxPages: Number(document.getElementById('maxPages').value),
+                maxDepth: Number(document.getElementById('maxDepth').value),
+                delayMinMs: Number(document.getElementById('delayMinMs').value),
+                delayMaxMs: Number(document.getElementById('delayMaxMs').value),
+                respectRobots: document.getElementById('respectRobots').checked,
+                saveExternalAssets: document.getElementById('saveExternalAssets').checked,
+                singlePage: singlePageInput.checked,
+            };
+        }
+
+        function syncSinglePageBadge() {
+            if (singlePageInput.checked) {
+                singlePageBadge.textContent = 'ACTIVE';
+                singlePageBadge.classList.add('active');
+            } else {
+                singlePageBadge.textContent = 'INACTIVE';
+                singlePageBadge.classList.remove('active');
+            }
+        }
+
+        async function submitCrawl(payload) {
+            const response = await fetch('/api/crawl', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+
+            const data = await response.json();
+            if (!response.ok) {
+                resultEl.textContent = data.error || 'Nu am putut porni job-ul.';
+                return false;
+            }
+
+            statusEl.textContent = payload.singlePage
+                ? 'Job single-page pornit...'
+                : 'Job crawl pornit...';
+            await refreshStatus();
+            await refreshSavedRuns();
+            return true;
+        }
+
+        function renderLogs(logs) {
+            logsEl.innerHTML = '';
+            for (const log of logs.slice(-120).reverse()) {
+                const li = document.createElement('li');
+                li.className = log.level || 'info';
+                li.textContent = `[${new Date(log.at).toLocaleTimeString()}] ${log.message}`;
+                logsEl.appendChild(li);
+            }
+        }
+
+        function renderDryStats(result) {
+            const d = result.depthHistogram || {};
+            const depthRows = Object.keys(d)
+                .map((k) => `Depth ${k}: ${d[k]} pagini`)
+                .join(' | ');
+
+            dryStatsEl.style.display = 'block';
+            dryStatsEl.innerHTML =
+                `Pagini vizitate: <b>${result.pagesVisited}</b>, pagini descoperite: <b>${result.pagesDiscovered}</b>, depth max observat: <b>${result.maxObservedDepth}</b><br>` +
+                `Distribuție nivele: ${depthRows || 'fara date'}<br>` +
+                `Recomandat: Max pages <b>${result.recommendations.maxPages}</b>, Max depth <b>${result.recommendations.maxDepth}</b>`;
+        }
+
+        async function refreshSavedRuns() {
+            const response = await fetch('/api/runs');
+            const data = await response.json();
+            const runs = data.runs || [];
+            savedRunsEl.innerHTML = '';
+
+            if (runs.length === 0) {
+                const li = document.createElement('li');
+                li.textContent = 'Nu exista arhive salvate inca.';
+                savedRunsEl.appendChild(li);
+                return;
+            }
+
+            for (const run of runs.slice(0, 30)) {
+                const li = document.createElement('li');
+                const when = new Date(run.createdAt).toLocaleString();
+
+                const left = document.createElement('span');
+                if (run.webPath) {
+                    const link = document.createElement('a');
+                    link.href = run.webPath;
+                    link.target = '_blank';
+                    link.rel = 'noreferrer';
+                    link.textContent = run.name;
+                    left.appendChild(link);
+                } else {
+                    const plain = document.createElement('span');
+                    plain.textContent = run.name;
+                    left.appendChild(plain);
+
+                    const badge = document.createElement('span');
+                    badge.className = 'missing-index';
+                    badge.textContent = 'incomplet (fara index.html)';
+                    badge.style.marginLeft = '8px';
+                    left.appendChild(badge);
+                }
+
+                const actions = document.createElement('span');
+                actions.className = 'run-actions';
+
+                const dateText = document.createElement('span');
+                dateText.textContent = when;
+
+                const deleteBtn = document.createElement('button');
+                deleteBtn.className = 'delete-btn';
+                deleteBtn.type = 'button';
+                deleteBtn.textContent = 'Delete';
+                deleteBtn.addEventListener('click', async () => {
+                    const ok = confirm(`Stergi arhiva "${run.name}"? Actiunea este permanenta.`);
+                    if (!ok) return;
+
+                    const deleteResponse = await fetch(`/api/runs/${encodeURIComponent(run.name)}`, { method: 'DELETE' });
+                    const deleteData = await deleteResponse.json();
+                    if (!deleteResponse.ok) {
+                        resultEl.textContent = deleteData.error || 'Nu am putut sterge arhiva.';
+                        return;
+                    }
+
+                    resultEl.textContent = `Arhiva ${run.name} a fost stearsa.`;
+                    await refreshSavedRuns();
+                });
+
+                actions.appendChild(dateText);
+                actions.appendChild(deleteBtn);
+                li.appendChild(left);
+                li.appendChild(actions);
+                savedRunsEl.appendChild(li);
+            }
+        }
+
+        async function refreshStatus() {
+            const response = await fetch('/api/status');
+            const status = await response.json();
+
+            if (!status.id) {
+                statusEl.textContent = 'Niciun job activ.';
+                stopBtn.style.display = 'none';
+                return;
+            }
+
+            statusEl.textContent = `Job #${status.id} - ${status.status}`;
+            renderLogs(status.logs || []);
+            stopBtn.style.display = (status.status === 'running' || status.status === 'stopping') ? 'inline-block' : 'none';
+
+            if (status.status === 'running') {
+                if (status.mode === 'dry-run') {
+                    resultEl.textContent = 'Dry run in executie...';
+                } else if (status.input && status.input.singlePage) {
+                    resultEl.textContent = 'Crawler in executie (single-page)...';
+                } else {
+                    resultEl.textContent = 'Crawler in executie...';
+                }
+            } else if (status.status === 'stopping') {
+                resultEl.textContent = 'Oprire in curs...';
+            } else if (status.status === 'completed' && status.result && status.mode === 'dry-run') {
+                latestRecommendations = status.result.recommendations;
+                applyRecBtn.style.display = 'inline-block';
+                renderDryStats(status.result);
+                resultEl.textContent = 'Dry run finalizat. Poti aplica recomandarile in formular.';
+            } else if (status.status === 'completed' && status.result) {
+                resultEl.innerHTML = `Terminat: ${status.result.totalVisited} pagini, ${status.result.totalFailed} erori. <a href="${status.result.webPath}" target="_blank" rel="noreferrer">Deschide arhiva</a>`;
+            } else if (status.status === 'stopped' && status.result) {
+                resultEl.textContent = `Job oprit manual: ${status.result.error}`;
+            } else if (status.status === 'failed' && status.result) {
+                resultEl.textContent = `Job esuat: ${status.result.error}`;
+            }
+        }
+
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const payload = payloadFromForm();
+            resultEl.textContent = '';
+
+            const delayError = validateCrawlDelays(payload.delayMinMs, payload.delayMaxMs);
+            if (delayError) {
+                resultEl.textContent = delayError;
+                return;
+            }
+
+            await submitCrawl(payload);
+        });
+
+        dryRunBtn.addEventListener('click', async () => {
+            const base = payloadFromForm();
+            latestRecommendations = null;
+            applyRecBtn.style.display = 'none';
+            dryStatsEl.style.display = 'none';
+            resultEl.textContent = '';
+
+            const response = await fetch('/api/dry-run', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                    targetUrl: base.targetUrl,
+                    delayMinMs: 180,
+                    delayMaxMs: 420,
+                    respectRobots: base.respectRobots,
+                    saveExternalAssets: false,
+                    maxPagesProbe: 260,
+                    maxDepthProbe: 8,
+                }),
+            });
+
+            const data = await response.json();
+            if (!response.ok) {
+                resultEl.textContent = data.error || 'Nu am putut porni dry run.';
+                return;
+            }
+
+            statusEl.textContent = 'Dry run pornit...';
+            await refreshStatus();
+        });
+
+        applyRecBtn.addEventListener('click', () => {
+            if (!latestRecommendations) return;
+            document.getElementById('maxPages').value = latestRecommendations.maxPages;
+            document.getElementById('maxDepth').value = latestRecommendations.maxDepth;
+            resultEl.textContent = 'Recomandarile au fost aplicate in formular.';
+        });
+
+        stopBtn.addEventListener('click', async () => {
+            const response = await fetch('/api/stop', { method: 'POST' });
+            const data = await response.json();
+            if (!response.ok) {
+                resultEl.textContent = data.message || 'Nu exista job activ de oprit.';
+                return;
+            }
+            resultEl.textContent = data.message;
+            await refreshStatus();
+        });
+
+        singlePageInput.addEventListener('change', syncSinglePageBadge);
+
+        syncSinglePageBadge();
+        refreshStatus();
+        refreshSavedRuns();
+        setInterval(refreshStatus, 2000);
+        setInterval(refreshSavedRuns, 8000);
+    </script>
+</body>
+
+</html>
