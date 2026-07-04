@@ -225,6 +225,21 @@
             background: #ffeaea;
         }
 
+        .zip-btn {
+            border: 1px solid #8bbcb7;
+            background: #effcf8;
+            color: #0f6b53;
+            border-radius: 8px;
+            padding: 4px 8px;
+            font-size: .78rem;
+            font-weight: 700;
+            text-decoration: none;
+        }
+
+        .zip-btn:hover {
+            background: #ddf7ef;
+        }
+
         .actions {
             display: flex;
             gap: 10px;
@@ -512,7 +527,14 @@
                     await refreshSavedRuns();
                 });
 
+                const zipLink = document.createElement('a');
+                zipLink.className = 'zip-btn';
+                zipLink.href = `/api/runs/${encodeURIComponent(run.name)}/zip`;
+                zipLink.download = `${run.name}.zip`;
+                zipLink.textContent = 'Download ZIP';
+
                 actions.appendChild(dateText);
+                actions.appendChild(zipLink);
                 actions.appendChild(deleteBtn);
                 li.appendChild(left);
                 li.appendChild(actions);

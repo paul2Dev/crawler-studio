@@ -9,6 +9,7 @@
     "dev": "node app.js"
   },
   "dependencies": {
+    "archiver": "^8.0.0",
     "cheerio": "^1.1.2",
     "crawler-studio": "file:",
     "express": "^4.21.2",

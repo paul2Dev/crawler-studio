@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs/promises');
 const express = require('express');
+const archiver = require('archiver');
 
 const { JobManager } = require('./src/job-manager');
 
@@ -190,6 +191,43 @@ app.delete('/api/runs/:runName', async (req, res) => {
     } catch (error) {
         return res.status(500).json({ error: `Nu am putut sterge arhiva: ${error.message}` });
     }
+});
+
+app.get('/api/runs/:runName/zip', async (req, res) => {
+    const runName = String(req.params.runName || '');
+    if (!/^[a-zA-Z0-9._-]+$/.test(runName)) {
+        return res.status(400).json({ error: 'Nume arhiva invalid.' });
+    }
+
+    const runDir = path.resolve(OUTPUT_RUNS_DIR, runName);
+    const expectedRoot = `${path.resolve(OUTPUT_RUNS_DIR)}${path.sep}`;
+    if (!runDir.startsWith(expectedRoot)) {
+        return res.status(400).json({ error: 'Cale arhiva invalida.' });
+    }
+
+    const stat = await fs.stat(runDir).catch(() => null);
+    if (!stat || !stat.isDirectory()) {
+        return res.status(404).json({ error: 'Arhiva nu exista.' });
+    }
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${runName}.zip"`);
+
+    const archive = typeof archiver === 'function'
+        ? archiver('zip', { zlib: { level: 9 } })
+        : new archiver.ZipArchive({ zlib: { level: 9 } });
+    archive.on('error', (error) => {
+        if (!res.headersSent) {
+            res.status(500).json({ error: `Nu am putut genera ZIP: ${error.message}` });
+            return;
+        }
+        res.destroy(error);
+    });
+
+    archive.pipe(res);
+    archive.directory(runDir, runName);
+    archive.finalize();
+    return undefined;
 });
 
 app.get('/api/status', (_req, res) => {
