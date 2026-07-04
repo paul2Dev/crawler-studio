@@ -129,6 +129,14 @@
             margin-bottom: 10px;
         }
 
+        .result-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
         .stats {
             margin: 10px 0 12px;
             border: 1px solid var(--line);
@@ -138,6 +146,12 @@
             font-size: .91rem;
             color: #333;
             display: none;
+        }
+
+        .stats h3 {
+            margin: 0 0 10px;
+            font-size: .98rem;
+            color: #3f3a33;
         }
 
         .audit-panel {
@@ -154,10 +168,6 @@
             font-size: .98rem;
         }
 
-        .audit-table-wrap {
-            overflow-x: auto;
-        }
-
         .audit-table {
             width: 100%;
             border-collapse: collapse;
@@ -165,6 +175,10 @@
             border: 1px solid #ded5c7;
             border-radius: 10px;
             overflow: hidden;
+        }
+
+        .audit-table-wrap {
+            overflow-x: auto;
         }
 
         .audit-table th,
@@ -418,7 +432,10 @@
 
         <section class="card">
             <div class="status" id="status">Niciun job activ.</div>
-            <div class="result" id="result"></div>
+            <div class="result-row">
+                <div class="result" id="result"></div>
+                <button id="exportLinksBtn" type="button" class="ghost" style="display:none;">Export linkuri gasite</button>
+            </div>
             <div class="stats" id="dryStats"></div>
             <div class="audit-panel" id="auditPanel"></div>
             <ul class="logs" id="logs"></ul>
@@ -433,6 +450,7 @@
         const form = document.getElementById('crawl-form');
         const dryRunBtn = document.getElementById('dryRunBtn');
         const applyRecBtn = document.getElementById('applyRecBtn');
+        const exportLinksBtn = document.getElementById('exportLinksBtn');
         const stopBtn = document.getElementById('stopBtn');
         const statusEl = document.getElementById('status');
         const resultEl = document.getElementById('result');
@@ -445,6 +463,8 @@
         const singlePageInput = document.getElementById('singlePage');
         const singlePageBadge = document.getElementById('singlePageBadge');
         let latestRecommendations = null;
+        let latestDryRunLinks = [];
+        let latestDryRunStartUrl = '';
 
         const CRAWL_DELAY_MIN_RECOMMENDED = 700;
         const CRAWL_DELAY_MAX_RECOMMENDED = 1500;
@@ -520,16 +540,63 @@
         }
 
         function renderDryStats(result) {
-            const d = result.depthHistogram || {};
-            const depthRows = Object.keys(d)
-                .map((k) => `Depth ${k}: ${d[k]} pagini`)
-                .join(' | ');
+            const estimate = result.estimatedCrawlTime || {};
+            const avgMin = Number.isFinite(estimate.avgSeconds)
+                ? Math.max(1, Math.round(estimate.avgSeconds / 60))
+                : '-';
+            const rangeMin = (Number.isFinite(estimate.minSeconds) && Number.isFinite(estimate.maxSeconds))
+                ? `${Math.max(1, Math.round(estimate.minSeconds / 60))}-${Math.max(1, Math.round(estimate.maxSeconds / 60))} min`
+                : '-';
+            const dryRunSec = Number.isFinite(result.dryRunDurationMs)
+                ? (result.dryRunDurationMs / 1000).toFixed(1)
+                : '-';
 
             dryStatsEl.style.display = 'block';
             dryStatsEl.innerHTML =
-                `Pagini vizitate: <b>${result.pagesVisited}</b>, pagini descoperite: <b>${result.pagesDiscovered}</b>, depth max observat: <b>${result.maxObservedDepth}</b><br>` +
-                `Distribuție nivele: ${depthRows || 'fara date'}<br>` +
-                `Recomandat: Max pages <b>${result.recommendations.maxPages}</b>, Max depth <b>${result.recommendations.maxDepth}</b>`;
+                `<h3>Rezultat Dry Run</h3>` +
+                `<div class="audit-table-wrap">` +
+                `<table class="audit-table" aria-label="Rezultate dry run">` +
+                `<thead><tr><th>Indicator</th><th>Ce inseamna</th><th>Valoare</th></tr></thead>` +
+                `<tbody>` +
+                `<tr><td>Pagini gasite</td><td>Numar total de pagini interne descoperite in scanarea rapida.</td><td class="audit-count">${result.pagesDiscovered}</td></tr>` +
+                `<tr><td>Max depth observat</td><td>Cel mai adanc nivel de navigare detectat din pagina de start.</td><td class="audit-count">${result.maxObservedDepth}</td></tr>` +
+                `<tr><td>Durata dry run</td><td>Timp efectiv consumat pentru scanarea rapida.</td><td class="audit-count">${dryRunSec} s</td></tr>` +
+                `<tr><td>Timp estimat crawl real</td><td>Estimare pentru crawl complet folosind delay-urile reale recomandate.</td><td class="audit-count">~${avgMin} min (${rangeMin})</td></tr>` +
+                `</tbody></table></div>` +
+                `<div class="audit-legend">Estimarea foloseste delay-uri de crawl reale si un overhead mediu de incarcare pe pagina.</div>`;
+        }
+
+        function exportDiscoveredLinks() {
+            if (!Array.isArray(latestDryRunLinks) || latestDryRunLinks.length === 0) {
+                resultEl.textContent = 'Nu exista linkuri de exportat. Ruleaza intai un dry run.';
+                return;
+            }
+
+            const host = (() => {
+                try {
+                    return new URL(latestDryRunStartUrl || latestDryRunLinks[0]).hostname || 'site';
+                } catch {
+                    return 'site';
+                }
+            })();
+
+            const lines = [
+                `# Dry Run links export`,
+                `# Source: ${latestDryRunStartUrl || '-'}`,
+                `# Total links: ${latestDryRunLinks.length}`,
+                '',
+                ...latestDryRunLinks,
+            ];
+
+            const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+            const href = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = href;
+            a.download = `dry-run-links-${host}-${Date.now()}.txt`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(href);
         }
 
         function renderAudit(audit) {
@@ -664,6 +731,7 @@
             if (!status.id) {
                 statusEl.textContent = 'Niciun job activ.';
                 stopBtn.style.display = 'none';
+                exportLinksBtn.style.display = 'none';
                 renderAudit(null);
                 return;
             }
@@ -674,6 +742,7 @@
 
             if (status.status === 'running') {
                 renderAudit(null);
+                exportLinksBtn.style.display = 'none';
                 if (status.mode === 'dry-run') {
                     resultEl.textContent = 'Dry run in executie...';
                 } else if (status.input && status.input.singlePage) {
@@ -685,11 +754,15 @@
                 resultEl.textContent = 'Oprire in curs...';
             } else if (status.status === 'completed' && status.result && status.mode === 'dry-run') {
                 latestRecommendations = status.result.recommendations;
+                latestDryRunLinks = Array.isArray(status.result.discoveredLinks) ? status.result.discoveredLinks : [];
+                latestDryRunStartUrl = status.result.analyzedStartUrl || '';
                 applyRecBtn.style.display = 'inline-block';
+                exportLinksBtn.style.display = latestDryRunLinks.length > 0 ? 'inline-block' : 'none';
                 renderDryStats(status.result);
                 renderAudit(null);
                 resultEl.textContent = 'Dry run finalizat. Poti aplica recomandarile in formular.';
             } else if (status.status === 'completed' && status.result) {
+                exportLinksBtn.style.display = 'none';
                 const counts = status.result.audit && status.result.audit.counts
                     ? status.result.audit.counts
                     : null;
@@ -699,9 +772,11 @@
                 resultEl.innerHTML = `Terminat: ${status.result.totalVisited} pagini, ${status.result.totalFailed} erori.${auditSummary} <a href="${status.result.webPath}" target="_blank" rel="noreferrer">Deschide arhiva</a>`;
                 renderAudit(status.result.audit || null);
             } else if (status.status === 'stopped' && status.result) {
+                exportLinksBtn.style.display = 'none';
                 renderAudit(null);
                 resultEl.textContent = `Job oprit manual: ${status.result.error}`;
             } else if (status.status === 'failed' && status.result) {
+                exportLinksBtn.style.display = 'none';
                 renderAudit(null);
                 resultEl.textContent = `Job esuat: ${status.result.error}`;
             }
@@ -724,7 +799,10 @@
         dryRunBtn.addEventListener('click', async () => {
             const base = payloadFromForm();
             latestRecommendations = null;
+            latestDryRunLinks = [];
+            latestDryRunStartUrl = '';
             applyRecBtn.style.display = 'none';
+            exportLinksBtn.style.display = 'none';
             dryStatsEl.style.display = 'none';
             resultEl.textContent = '';
 
@@ -733,12 +811,14 @@
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({
                     targetUrl: base.targetUrl,
-                    delayMinMs: 180,
-                    delayMaxMs: 420,
+                    delayMinMs: 120,
+                    delayMaxMs: 260,
+                    crawlDelayMinMs: base.delayMinMs,
+                    crawlDelayMaxMs: base.delayMaxMs,
                     respectRobots: base.respectRobots,
                     saveExternalAssets: false,
-                    maxPagesProbe: 260,
-                    maxDepthProbe: 8,
+                    maxPagesProbe: 180,
+                    maxDepthProbe: 6,
                 }),
             });
 
@@ -758,6 +838,8 @@
             document.getElementById('maxDepth').value = latestRecommendations.maxDepth;
             resultEl.textContent = 'Recomandarile au fost aplicate in formular.';
         });
+
+        exportLinksBtn.addEventListener('click', exportDiscoveredLinks);
 
         stopBtn.addEventListener('click', async () => {
             const response = await fetch('/api/stop', { method: 'POST' });

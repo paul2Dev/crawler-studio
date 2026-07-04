@@ -1,5 +1,4 @@
 const { chromium } = require('playwright');
-const cheerio = require('cheerio');
 
 const { loadRobotsPolicy } = require('./robots');
 const { normalizeUrl, isSameHost } = require('./url-utils');
@@ -23,12 +22,14 @@ class SiteProfiler {
         this.options = {
             maxPagesProbe: 300,
             maxDepthProbe: 8,
-            delayMinMs: 300,
-            delayMaxMs: 900,
+            delayMinMs: 120,
+            delayMaxMs: 260,
             pageTimeoutMs: 35000,
-            settleMs: 900,
+            settleMs: 250,
             respectRobots: true,
             saveExternalAssets: false,
+            crawlDelayMinMs: 700,
+            crawlDelayMaxMs: 1500,
             ...options,
         };
         this.onProgress = onProgress;
@@ -56,6 +57,7 @@ class SiteProfiler {
     }
 
     async run() {
+        const startedAtMs = Date.now();
         const startUrl = normalizeUrl(this.options.startUrl);
         const origin = new URL(startUrl).origin;
 
@@ -116,8 +118,7 @@ class SiteProfiler {
                     this.ensureNotStopped();
                     await page.waitForTimeout(this.options.settleMs);
                     this.ensureNotStopped();
-                    const html = await page.content();
-                    const links = this.extractLinks(html, currentUrl, startUrl);
+                    const links = await this.collectLinksFromPage(page, currentUrl, startUrl);
 
                     for (const link of links) {
                         if (!discovered.has(link)) {
@@ -150,9 +151,11 @@ class SiteProfiler {
 
         const pagesDiscovered = discovered.size;
         const pagesVisited = visited.size;
+        const dryRunDurationMs = Date.now() - startedAtMs;
 
         const recommendedMaxDepth = Math.max(2, Math.min(12, maxObservedDepth + 1));
         const recommendedMaxPages = Math.max(60, Math.ceil(pagesDiscovered * 1.2));
+        const estimatedCrawlTime = this.estimateRealCrawlTime(pagesDiscovered);
 
         return {
             mode: 'dry-run',
@@ -161,7 +164,9 @@ class SiteProfiler {
             pagesDiscovered,
             failedPages,
             maxObservedDepth,
-            depthHistogram: Object.fromEntries([...depthHistogram.entries()].sort((a, b) => a[0] - b[0])),
+            dryRunDurationMs,
+            discoveredLinks: [...discovered].sort((a, b) => a.localeCompare(b)),
+            estimatedCrawlTime,
             recommendations: {
                 maxDepth: recommendedMaxDepth,
                 maxPages: recommendedMaxPages,
@@ -173,23 +178,46 @@ class SiteProfiler {
         };
     }
 
-    extractLinks(html, currentUrl, startUrl) {
-        const $ = cheerio.load(html);
+    async collectLinksFromPage(page, currentUrl, startUrl) {
+        const hrefs = await page.$$eval('a[href]', (nodes) =>
+            nodes
+                .map((n) => n.getAttribute('href') || '')
+                .filter((href) => href && !/^(#|mailto:|tel:|javascript:)/i.test(href)),
+        );
         const links = new Set();
 
-        $('a[href]').each((_, el) => {
-            const href = $(el).attr('href');
-            if (!href || /^(#|mailto:|tel:|javascript:)/i.test(href)) return;
-
+        for (const href of hrefs) {
             try {
                 const absolute = normalizeUrl(new URL(href, currentUrl).toString());
                 if (isSameHost(startUrl, absolute)) links.add(absolute);
             } catch {
                 // Ignore malformed URLs.
             }
-        });
+        }
 
         return [...links];
+    }
+
+    estimateRealCrawlTime(pagesCount) {
+        const pageOverheadMs = 1200; // Typical navigation/render overhead per page.
+        const minPerPage = this.options.crawlDelayMinMs + pageOverheadMs;
+        const maxPerPage = this.options.crawlDelayMaxMs + pageOverheadMs;
+        const avgPerPage = Math.round((minPerPage + maxPerPage) / 2);
+
+        const minSeconds = Math.round((pagesCount * minPerPage) / 1000);
+        const maxSeconds = Math.round((pagesCount * maxPerPage) / 1000);
+        const avgSeconds = Math.round((pagesCount * avgPerPage) / 1000);
+
+        return {
+            minSeconds,
+            maxSeconds,
+            avgSeconds,
+            assumptions: {
+                crawlDelayMinMs: this.options.crawlDelayMinMs,
+                crawlDelayMaxMs: this.options.crawlDelayMaxMs,
+                pageOverheadMs,
+            },
+        };
     }
 }
 
@@ -200,6 +228,8 @@ function buildProfilerOptions(input) {
         maxDepthProbe: input.maxDepthProbe,
         delayMinMs: input.delayMinMs,
         delayMaxMs: input.delayMaxMs,
+        crawlDelayMinMs: input.crawlDelayMinMs,
+        crawlDelayMaxMs: input.crawlDelayMaxMs,
         respectRobots: input.respectRobots,
         saveExternalAssets: input.saveExternalAssets,
         userAgent: DEFAULT_UA[rand(0, DEFAULT_UA.length - 1)],

@@ -299,11 +299,14 @@ app.post('/api/dry-run', async (req, res) => {
 
         const input = {
             targetUrl: parsed.toString(),
-            maxPagesProbe: Math.max(40, normalizeInteger(body.maxPagesProbe, 260)),
-            maxDepthProbe: Math.max(2, normalizeInteger(body.maxDepthProbe, 8)),
+            maxPagesProbe: Math.max(30, normalizeInteger(body.maxPagesProbe, 180)),
+            maxDepthProbe: Math.max(2, normalizeInteger(body.maxDepthProbe, 6)),
             // Dry run intentionally uses lower delays for faster page graph estimation.
-            delayMinMs: Math.max(150, normalizeInteger(body.delayMinMs, 180)),
-            delayMaxMs: Math.max(300, normalizeInteger(body.delayMaxMs, 420)),
+            delayMinMs: Math.max(60, normalizeInteger(body.delayMinMs, 120)),
+            delayMaxMs: Math.max(120, normalizeInteger(body.delayMaxMs, 260)),
+            // Estimate for real crawl duration uses production delays, not probe delays.
+            crawlDelayMinMs: Math.max(700, normalizeInteger(body.crawlDelayMinMs, 700)),
+            crawlDelayMaxMs: Math.max(1500, normalizeInteger(body.crawlDelayMaxMs, 1500)),
             respectRobots: body.respectRobots !== false,
             saveExternalAssets: false,
         };
