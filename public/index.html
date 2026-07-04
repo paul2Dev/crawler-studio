@@ -118,6 +118,13 @@
             box-shadow: 0 8px 18px rgba(15, 118, 110, .25);
         }
 
+        button:disabled {
+            opacity: .55;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
         .status {
             margin-bottom: 10px;
             font-size: .96rem;
@@ -434,7 +441,8 @@
             <div class="status" id="status">Niciun job activ.</div>
             <div class="result-row">
                 <div class="result" id="result"></div>
-                <button id="exportLinksBtn" type="button" class="ghost" style="display:none;">Export linkuri gasite</button>
+                <button id="exportLinksBtn" type="button" class="ghost" style="display:none;">Export linkuri
+                    gasite</button>
             </div>
             <div class="stats" id="dryStats"></div>
             <div class="audit-panel" id="auditPanel"></div>
@@ -448,6 +456,7 @@
 
     <script>
         const form = document.getElementById('crawl-form');
+        const crawlBtn = document.getElementById('crawlBtn');
         const dryRunBtn = document.getElementById('dryRunBtn');
         const applyRecBtn = document.getElementById('applyRecBtn');
         const exportLinksBtn = document.getElementById('exportLinksBtn');
@@ -508,6 +517,11 @@
             }
         }
 
+        function setStartButtonsEnabled(enabled) {
+            crawlBtn.disabled = !enabled;
+            dryRunBtn.disabled = !enabled;
+        }
+
         async function submitCrawl(payload) {
             const response = await fetch('/api/crawl', {
                 method: 'POST',
@@ -518,6 +532,7 @@
             const data = await response.json();
             if (!response.ok) {
                 resultEl.textContent = data.error || 'Nu am putut porni job-ul.';
+                setStartButtonsEnabled(true);
                 return false;
             }
 
@@ -732,6 +747,7 @@
                 statusEl.textContent = 'Niciun job activ.';
                 stopBtn.style.display = 'none';
                 exportLinksBtn.style.display = 'none';
+                setStartButtonsEnabled(true);
                 renderAudit(null);
                 return;
             }
@@ -741,6 +757,7 @@
             stopBtn.style.display = (status.status === 'running' || status.status === 'stopping') ? 'inline-block' : 'none';
 
             if (status.status === 'running') {
+                setStartButtonsEnabled(false);
                 renderAudit(null);
                 exportLinksBtn.style.display = 'none';
                 if (status.mode === 'dry-run') {
@@ -751,8 +768,10 @@
                     resultEl.textContent = 'Crawler in executie...';
                 }
             } else if (status.status === 'stopping') {
+                setStartButtonsEnabled(false);
                 resultEl.textContent = 'Oprire in curs...';
             } else if (status.status === 'completed' && status.result && status.mode === 'dry-run') {
+                setStartButtonsEnabled(true);
                 latestRecommendations = status.result.recommendations;
                 latestDryRunLinks = Array.isArray(status.result.discoveredLinks) ? status.result.discoveredLinks : [];
                 latestDryRunStartUrl = status.result.analyzedStartUrl || '';
@@ -762,6 +781,7 @@
                 renderAudit(null);
                 resultEl.textContent = 'Dry run finalizat. Poti aplica recomandarile in formular.';
             } else if (status.status === 'completed' && status.result) {
+                setStartButtonsEnabled(true);
                 exportLinksBtn.style.display = 'none';
                 const counts = status.result.audit && status.result.audit.counts
                     ? status.result.audit.counts
@@ -772,10 +792,12 @@
                 resultEl.innerHTML = `Terminat: ${status.result.totalVisited} pagini, ${status.result.totalFailed} erori.${auditSummary} <a href="${status.result.webPath}" target="_blank" rel="noreferrer">Deschide arhiva</a>`;
                 renderAudit(status.result.audit || null);
             } else if (status.status === 'stopped' && status.result) {
+                setStartButtonsEnabled(true);
                 exportLinksBtn.style.display = 'none';
                 renderAudit(null);
                 resultEl.textContent = `Job oprit manual: ${status.result.error}`;
             } else if (status.status === 'failed' && status.result) {
+                setStartButtonsEnabled(true);
                 exportLinksBtn.style.display = 'none';
                 renderAudit(null);
                 resultEl.textContent = `Job esuat: ${status.result.error}`;
@@ -793,6 +815,7 @@
                 return;
             }
 
+            setStartButtonsEnabled(false);
             await submitCrawl(payload);
         });
 
@@ -825,9 +848,11 @@
             const data = await response.json();
             if (!response.ok) {
                 resultEl.textContent = data.error || 'Nu am putut porni dry run.';
+                setStartButtonsEnabled(true);
                 return;
             }
 
+            setStartButtonsEnabled(false);
             statusEl.textContent = 'Dry run pornit...';
             await refreshStatus();
         });
