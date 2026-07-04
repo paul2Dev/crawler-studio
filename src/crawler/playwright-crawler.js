@@ -41,6 +41,57 @@ function looksLikeAssetUrl(urlString) {
     }
 }
 
+function normalizeHeaderValue(value) {
+    return String(value || '').toLowerCase().split(';')[0].trim();
+}
+
+function detectMimeMismatch(urlString, contentType) {
+    let ext = '';
+    try {
+        ext = path.extname(new URL(urlString).pathname || '').toLowerCase();
+    } catch {
+        return null;
+    }
+
+    if (!ext || !contentType) return null;
+
+    const expectedByExt = {
+        '.css': ['text/css'],
+        '.js': ['application/javascript', 'text/javascript'],
+        '.mjs': ['application/javascript', 'text/javascript'],
+        '.json': ['application/json', 'text/json'],
+        '.svg': ['image/svg+xml'],
+        '.png': ['image/png'],
+        '.jpg': ['image/jpeg'],
+        '.jpeg': ['image/jpeg'],
+        '.webp': ['image/webp'],
+        '.gif': ['image/gif'],
+        '.ico': ['image/x-icon', 'image/vnd.microsoft.icon'],
+        '.woff': ['font/woff'],
+        '.woff2': ['font/woff2'],
+        '.ttf': ['font/ttf', 'application/x-font-ttf'],
+        '.otf': ['font/otf', 'font/ttf', 'application/font-sfnt'],
+        '.mp4': ['video/mp4'],
+        '.mp3': ['audio/mpeg'],
+    };
+
+    const expected = expectedByExt[ext];
+    if (!expected || expected.length === 0) return null;
+
+    const normalizedType = normalizeHeaderValue(contentType);
+    if (!normalizedType || normalizedType === 'application/octet-stream') return null;
+
+    const isExpected = expected.some((token) => normalizedType.includes(token));
+    if (isExpected) return null;
+
+    return {
+        url: urlString,
+        extension: ext,
+        contentType: normalizedType,
+        expected,
+    };
+}
+
 class PlaywrightCrawler {
     constructor(options, onProgress = () => { }) {
         this.options = {
@@ -63,9 +114,28 @@ class PlaywrightCrawler {
         this.assetMap = new Map();
         this.visited = new Set();
         this.failed = [];
+        this.audit = {
+            redirects: [],
+            missingAssets: [],
+            brokenInternalLinks: [],
+            mimeMismatches: [],
+        };
+        this.auditSeen = {
+            redirects: new Set(),
+            missingAssets: new Set(),
+            brokenInternalLinks: new Set(),
+            mimeMismatches: new Set(),
+        };
         this.stopRequested = false;
         this.browser = null;
         this.context = null;
+    }
+
+    addAuditEntry(kind, key, entry) {
+        if (!this.auditSeen[kind].has(key)) {
+            this.auditSeen[kind].add(key);
+            this.audit[kind].push(entry);
+        }
     }
 
     requestStop() {
@@ -137,6 +207,14 @@ class PlaywrightCrawler {
                         const url = response.url();
                         if (!url.startsWith('http')) return;
 
+                        const mismatch = detectMimeMismatch(url, response.headers()['content-type'] || '');
+                        if (mismatch) {
+                            this.addAuditEntry('mimeMismatches', `${url}|${mismatch.contentType}`, {
+                                pageUrl: currentUrl,
+                                ...mismatch,
+                            });
+                        }
+
                         const sameHost = isSameHost(startUrl, url);
                         if (!sameHost && !this.options.saveExternalAssets) return;
 
@@ -163,6 +241,14 @@ class PlaywrightCrawler {
                         waitUntil: 'domcontentloaded',
                         timeout: this.options.pageTimeoutMs,
                     });
+
+                    const finalUrl = normalizeUrl(page.url());
+                    if (finalUrl !== currentUrl) {
+                        this.addAuditEntry('redirects', `${currentUrl}=>${finalUrl}`, {
+                            from: currentUrl,
+                            to: finalUrl,
+                        });
+                    }
 
                     this.ensureNotStopped();
                     await page.waitForTimeout(this.options.settleMs);
@@ -219,6 +305,7 @@ class PlaywrightCrawler {
             ? path.relative(htmlFolder, startPagePath).split(path.sep).join('/')
             : null;
         const archiveIndexFile = await this.writeIndex(startUrl);
+        const audit = await this.buildAuditReport(startUrl);
 
         return {
             outputDir: this.options.outputDir,
@@ -227,6 +314,7 @@ class PlaywrightCrawler {
             failed: this.failed,
             startPageFile,
             archiveIndexFile,
+            audit,
         };
     }
 
@@ -386,6 +474,13 @@ class PlaywrightCrawler {
             if (!body.length) return;
 
             const contentType = res.headers.get('content-type') || '';
+            const mismatch = detectMimeMismatch(assetUrl, contentType);
+            if (mismatch) {
+                this.addAuditEntry('mimeMismatches', `${assetUrl}|${mismatch.contentType}`, {
+                    pageUrl: null,
+                    ...mismatch,
+                });
+            }
             const fakeResponse = {
                 headers() {
                     return { 'content-type': contentType };
@@ -475,6 +570,138 @@ class PlaywrightCrawler {
         );
         return archiveIndexFile;
     }
+
+    async buildAuditReport(startUrl) {
+        const outputRoot = path.resolve(this.options.outputDir);
+        const assetSelectors = [
+            ['link[href]', 'href'],
+            ['script[src]', 'src'],
+            ['img[src]', 'src'],
+            ['source[src]', 'src'],
+            ['video[src]', 'src'],
+            ['audio[src]', 'src'],
+        ];
+
+        const resolveLocalRef = (pageDir, rawValue) => {
+            const clean = String(rawValue || '').split('#')[0].split('?')[0].trim();
+            if (!clean) return null;
+
+            const resolved = clean.startsWith('/')
+                ? path.resolve(outputRoot, clean.slice(1))
+                : path.resolve(pageDir, clean);
+
+            const isInside = resolved === outputRoot || resolved.startsWith(`${outputRoot}${path.sep}`);
+            if (!isInside) return null;
+            return { clean, resolved };
+        };
+
+        for (const [pageUrl, pageFilePath] of this.pageMap.entries()) {
+            const html = await fs.readFile(pageFilePath, 'utf8').catch(() => '');
+            if (!html) continue;
+
+            const $ = cheerio.load(html);
+            const pageDir = path.dirname(pageFilePath);
+
+            for (const [selector, attr] of assetSelectors) {
+                const nodes = $(selector).toArray();
+                for (const el of nodes) {
+                    const raw = ($(el).attr(attr) || '').trim();
+                    if (!raw || /^(data:|mailto:|tel:|javascript:|#)/i.test(raw)) continue;
+
+                    if (/^https?:\/\//i.test(raw)) {
+                        let absolute;
+                        try {
+                            absolute = normalizeUrl(raw);
+                        } catch {
+                            continue;
+                        }
+
+                        if (!isSameHost(startUrl, absolute) || !looksLikeAssetUrl(absolute)) continue;
+                        this.addAuditEntry('missingAssets', `${pageUrl}|${absolute}`, {
+                            pageUrl,
+                            assetUrl: absolute,
+                            source: `${selector}[${attr}]`,
+                            reason: 'asset same-host ramas remote in HTML',
+                        });
+                        continue;
+                    }
+
+                    const localRef = resolveLocalRef(pageDir, raw);
+                    if (!localRef) continue;
+                    const stat = await fs.stat(localRef.resolved).catch(() => null);
+                    if (stat && stat.isFile()) continue;
+
+                    this.addAuditEntry('missingAssets', `${pageUrl}|${localRef.clean}`, {
+                        pageUrl,
+                        assetUrl: localRef.clean,
+                        source: `${selector}[${attr}]`,
+                        reason: 'fisier local lipsa dupa rewrite',
+                    });
+                }
+            }
+
+            const linkNodes = $('a[href]').toArray();
+            for (const el of linkNodes) {
+                const raw = ($(el).attr('href') || '').trim();
+                if (!raw || /^(data:|mailto:|tel:|javascript:|#)/i.test(raw)) continue;
+
+                if (/^https?:\/\//i.test(raw)) {
+                    let absolute;
+                    try {
+                        absolute = normalizeUrl(raw);
+                    } catch {
+                        continue;
+                    }
+
+                    if (!isSameHost(startUrl, absolute)) continue;
+
+                    if (looksLikeAssetUrl(absolute)) {
+                        this.addAuditEntry('missingAssets', `${pageUrl}|${absolute}`, {
+                            pageUrl,
+                            assetUrl: absolute,
+                            source: 'a[href]',
+                            reason: 'link spre asset same-host ramas remote',
+                        });
+                    } else if (!this.pageMap.has(absolute)) {
+                        this.addAuditEntry('brokenInternalLinks', `${pageUrl}|${absolute}`, {
+                            pageUrl,
+                            targetUrl: absolute,
+                            reason: 'pagina interna neexportata',
+                        });
+                    }
+                    continue;
+                }
+
+                const localRef = resolveLocalRef(pageDir, raw);
+                if (!localRef) continue;
+                const stat = await fs.stat(localRef.resolved).catch(() => null);
+                if (stat && stat.isFile()) continue;
+
+                this.addAuditEntry('brokenInternalLinks', `${pageUrl}|${localRef.clean}`, {
+                    pageUrl,
+                    targetUrl: localRef.clean,
+                    reason: 'fisier local lipsa dupa rewrite',
+                });
+            }
+        }
+
+        const report = {
+            generatedAt: new Date().toISOString(),
+            counts: {
+                missingAssets: this.audit.missingAssets.length,
+                brokenInternalLinks: this.audit.brokenInternalLinks.length,
+                redirects: this.audit.redirects.length,
+                mimeMismatches: this.audit.mimeMismatches.length,
+            },
+            missingAssets: this.audit.missingAssets,
+            brokenInternalLinks: this.audit.brokenInternalLinks,
+            redirects: this.audit.redirects,
+            mimeMismatches: this.audit.mimeMismatches,
+        };
+
+        await fs.writeFile(path.join(this.options.outputDir, 'run-audit.json'), JSON.stringify(report, null, 2), 'utf8');
+        return report;
+    }
 }
 
 function buildCrawlerOptions(input) {
@@ -491,6 +718,7 @@ function buildCrawlerOptions(input) {
         delayMaxMs: input.delayMaxMs,
         respectRobots: input.respectRobots,
         saveExternalAssets: input.saveExternalAssets,
+        singlePage: input.singlePage,
         userAgent: DEFAULT_UA[rand(0, DEFAULT_UA.length - 1)],
     };
 }

@@ -60,6 +60,7 @@ class JobManager {
             job.result = {
                 ...result,
                 webPath: `/runs/${runFolder}/html/${preferredEntry}`,
+                auditWebPath: `/runs/${runFolder}/run-audit.json`,
             };
 
             return job;

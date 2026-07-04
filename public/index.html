@@ -140,6 +140,65 @@
             display: none;
         }
 
+        .audit-panel {
+            margin: 10px 0 12px;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            background: #f7f4ee;
+            padding: 12px;
+            display: none;
+        }
+
+        .audit-panel h3 {
+            margin: 0 0 10px;
+            font-size: .98rem;
+        }
+
+        .audit-table-wrap {
+            overflow-x: auto;
+        }
+
+        .audit-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #fffdf8;
+            border: 1px solid #ded5c7;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .audit-table th,
+        .audit-table td {
+            text-align: left;
+            padding: 8px 10px;
+            border-bottom: 1px solid #ece2d3;
+            font-size: .85rem;
+            vertical-align: top;
+        }
+
+        .audit-table th {
+            background: #f2eadf;
+            color: #4b443a;
+            font-weight: 700;
+        }
+
+        .audit-table tr:last-child td {
+            border-bottom: 0;
+        }
+
+        .audit-count {
+            font-size: .98rem;
+            font-weight: 700;
+            color: #3f3a33;
+            white-space: nowrap;
+        }
+
+        .audit-legend {
+            margin-top: 8px;
+            font-size: .8rem;
+            color: #5b5449;
+        }
+
         .hint {
             margin-top: -2px;
             font-size: .82rem;
@@ -306,6 +365,12 @@
             main {
                 margin: 16px auto;
             }
+
+            .audit-table th,
+            .audit-table td {
+                font-size: .8rem;
+                padding: 7px 8px;
+            }
         }
     </style>
 </head>
@@ -355,6 +420,7 @@
             <div class="status" id="status">Niciun job activ.</div>
             <div class="result" id="result"></div>
             <div class="stats" id="dryStats"></div>
+            <div class="audit-panel" id="auditPanel"></div>
             <ul class="logs" id="logs"></ul>
             <div class="saved">
                 <h3>Arhive salvate</h3>
@@ -371,6 +437,7 @@
         const statusEl = document.getElementById('status');
         const resultEl = document.getElementById('result');
         const dryStatsEl = document.getElementById('dryStats');
+        const auditPanelEl = document.getElementById('auditPanel');
         const logsEl = document.getElementById('logs');
         const savedRunsEl = document.getElementById('savedRuns');
         const delayMinInput = document.getElementById('delayMinMs');
@@ -465,6 +532,54 @@
                 `Recomandat: Max pages <b>${result.recommendations.maxPages}</b>, Max depth <b>${result.recommendations.maxDepth}</b>`;
         }
 
+        function renderAudit(audit) {
+            if (!audit || !audit.counts) {
+                auditPanelEl.style.display = 'none';
+                auditPanelEl.innerHTML = '';
+                return;
+            }
+
+            const counts = audit.counts;
+            auditPanelEl.style.display = 'block';
+            auditPanelEl.innerHTML = `
+                <h3>Audit Post-Crawl</h3>
+                <div class="audit-table-wrap">
+                    <table class="audit-table" aria-label="Rezultate audit post-crawl">
+                        <thead>
+                            <tr>
+                                <th>Indicator</th>
+                                <th>Ce inseamna</th>
+                                <th>Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>Asset-uri lipsa</td>
+                                <td>Resurse necesare paginii (CSS, JS, imagini, fonturi) care nu au fost gasite local in export.</td>
+                                <td class="audit-count">${counts.missingAssets}</td>
+                            </tr>
+                            <tr>
+                                <td>Linkuri interne rupte</td>
+                                <td>Linkuri catre pagini interne care nu exista in arhiva generata.</td>
+                                <td class="audit-count">${counts.brokenInternalLinks}</td>
+                            </tr>
+                            <tr>
+                                <td>Redirectionari</td>
+                                <td>URL-uri care au raspuns cu redirect catre o alta pagina (301/302 etc.).</td>
+                                <td class="audit-count">${counts.redirects}</td>
+                            </tr>
+                            <tr>
+                                <td>MIME mismatch</td>
+                                <td>Tipul de continut servit nu corespunde extensiei fisierului (ex: .css livrat ca alt tip).</td>
+                                <td class="audit-count">${counts.mimeMismatches}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="audit-legend">0 inseamna ca nu s-au detectat probleme pentru indicatorul respectiv.</div>
+            `;
+        }
+
         async function refreshSavedRuns() {
             const response = await fetch('/api/runs');
             const data = await response.json();
@@ -549,6 +664,7 @@
             if (!status.id) {
                 statusEl.textContent = 'Niciun job activ.';
                 stopBtn.style.display = 'none';
+                renderAudit(null);
                 return;
             }
 
@@ -557,6 +673,7 @@
             stopBtn.style.display = (status.status === 'running' || status.status === 'stopping') ? 'inline-block' : 'none';
 
             if (status.status === 'running') {
+                renderAudit(null);
                 if (status.mode === 'dry-run') {
                     resultEl.textContent = 'Dry run in executie...';
                 } else if (status.input && status.input.singlePage) {
@@ -570,12 +687,22 @@
                 latestRecommendations = status.result.recommendations;
                 applyRecBtn.style.display = 'inline-block';
                 renderDryStats(status.result);
+                renderAudit(null);
                 resultEl.textContent = 'Dry run finalizat. Poti aplica recomandarile in formular.';
             } else if (status.status === 'completed' && status.result) {
-                resultEl.innerHTML = `Terminat: ${status.result.totalVisited} pagini, ${status.result.totalFailed} erori. <a href="${status.result.webPath}" target="_blank" rel="noreferrer">Deschide arhiva</a>`;
+                const counts = status.result.audit && status.result.audit.counts
+                    ? status.result.audit.counts
+                    : null;
+                const auditSummary = counts
+                    ? ` | Audit: asset-uri lipsa ${counts.missingAssets}, linkuri rupte ${counts.brokenInternalLinks}, redirectionari ${counts.redirects}, MIME mismatch ${counts.mimeMismatches}`
+                    : '';
+                resultEl.innerHTML = `Terminat: ${status.result.totalVisited} pagini, ${status.result.totalFailed} erori.${auditSummary} <a href="${status.result.webPath}" target="_blank" rel="noreferrer">Deschide arhiva</a>`;
+                renderAudit(status.result.audit || null);
             } else if (status.status === 'stopped' && status.result) {
+                renderAudit(null);
                 resultEl.textContent = `Job oprit manual: ${status.result.error}`;
             } else if (status.status === 'failed' && status.result) {
+                renderAudit(null);
                 resultEl.textContent = `Job esuat: ${status.result.error}`;
             }
         }
