@@ -1,5 +1,55 @@
 const path = require('path');
 
+function extensionFromMimeType(contentType) {
+    const type = String(contentType || '').toLowerCase().split(';')[0].trim();
+    const byType = {
+        'application/pdf': '.pdf',
+        'text/plain': '.txt',
+        'text/csv': '.csv',
+        'application/json': '.json',
+        'application/zip': '.zip',
+        'application/msword': '.doc',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+        'application/vnd.ms-excel': '.xls',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+        'application/vnd.ms-powerpoint': '.ppt',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+        'image/png': '.png',
+        'image/jpeg': '.jpg',
+        'image/webp': '.webp',
+        'image/gif': '.gif',
+        'image/svg+xml': '.svg',
+        'video/mp4': '.mp4',
+        'audio/mpeg': '.mp3',
+        'font/woff': '.woff',
+        'font/woff2': '.woff2',
+        'font/ttf': '.ttf',
+        'font/otf': '.otf',
+        'text/css': '.css',
+        'application/javascript': '.js',
+        'text/javascript': '.js',
+    };
+    return byType[type] || '';
+}
+
+function fileNameFromContentDisposition(disposition) {
+    const raw = String(disposition || '');
+    if (!raw) return '';
+
+    const utf8Match = raw.match(/filename\*=UTF-8''([^;]+)/i);
+    if (utf8Match && utf8Match[1]) {
+        try {
+            return path.basename(decodeURIComponent(utf8Match[1].replace(/["']/g, '').trim()));
+        } catch {
+            return path.basename(utf8Match[1].replace(/["']/g, '').trim());
+        }
+    }
+
+    const plainMatch = raw.match(/filename=\s*"?([^";]+)"?/i);
+    if (!plainMatch || !plainMatch[1]) return '';
+    return path.basename(plainMatch[1].trim());
+}
+
 function sanitizePathSegment(segment) {
     const cleaned = String(segment || '')
         .replace(/[^a-zA-Z0-9._-]/g, '-')
@@ -28,6 +78,23 @@ function isLikelyDownloadUrl(urlString) {
         if (url.searchParams.has('url_parse')) return true;
         if (url.searchParams.has('download')) return true;
         if (url.searchParams.has('attachment')) return true;
+
+        return false;
+    } catch {
+        return false;
+    }
+}
+
+function isLikelyAjaxDataUrl(urlString) {
+    try {
+        const url = new URL(urlString);
+        const pathname = String(url.pathname || '').toLowerCase();
+
+        if (url.searchParams.get('is_ajax') === '1') return true;
+        if (url.searchParams.get('ajax') === '1' || url.searchParams.get('ajax') === 'true') return true;
+        if (url.searchParams.get('_x_requested_with') === 'xmlhttprequest') return true;
+        if (url.searchParams.get('format') === 'json') return true;
+        if (pathname.includes('/ajax/')) return true;
 
         return false;
     } catch {
@@ -80,8 +147,12 @@ function htmlFileNameFor(urlString) {
 
 function resolveOutputAssetPath(outputDir, assetUrl, response) {
     const url = new URL(assetUrl);
+    const headers = typeof response?.headers === 'function' ? response.headers() : {};
     const extFromPath = path.extname(url.pathname).toLowerCase();
-    const type = String(response.headers()['content-type'] || '').toLowerCase();
+    const type = String(headers['content-type'] || '').toLowerCase();
+    const dispositionName = fileNameFromContentDisposition(headers['content-disposition'] || '');
+    const extFromDisposition = path.extname(dispositionName).toLowerCase();
+    const extFromMime = extensionFromMimeType(type);
 
     let folder = 'files';
     if (type.includes('text/css')) folder = 'css';
@@ -96,10 +167,16 @@ function resolveOutputAssetPath(outputDir, assetUrl, response) {
     const pathname = url.pathname === '/' ? '/root' : url.pathname;
     const safe = pathname.replace(/^\//, '').replace(/[^a-zA-Z0-9._/-]/g, '_');
     const baseName = safe.split('/').pop() || 'asset';
-    const fileName = path.extname(baseName) ? baseName : `${baseName}${extFromPath || '.bin'}`;
+    const inferredExt = extFromPath || extFromDisposition || extFromMime || '.bin';
+    const preferredBaseName = dispositionName || baseName;
+    const fileName = path.extname(preferredBaseName) ? preferredBaseName : `${preferredBaseName}${inferredExt}`;
     const queryTail = url.search ? `-${Buffer.from(url.search).toString('base64url').slice(0, 10)}` : '';
+    const parsedName = path.parse(fileName);
+    const finalName = queryTail
+        ? `${parsedName.name}${queryTail}${parsedName.ext}`
+        : fileName;
 
-    return path.join(outputDir, folder, `${fileName}${queryTail}`);
+    return path.join(outputDir, folder, finalName);
 }
 
 function safeRelativeLink(fromHtmlPath, toPath) {
@@ -110,6 +187,7 @@ module.exports = {
     normalizeUrl,
     isSameHost,
     isLikelyDownloadUrl,
+    isLikelyAjaxDataUrl,
     shouldSkipLinkForCrawl,
     htmlFileNameFor,
     resolveOutputAssetPath,

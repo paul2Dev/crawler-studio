@@ -10,6 +10,7 @@ const {
     normalizeUrl,
     isSameHost,
     isLikelyDownloadUrl,
+    isLikelyAjaxDataUrl,
     shouldSkipLinkForCrawl,
     htmlFileNameFor,
     resolveOutputAssetPath,
@@ -111,7 +112,7 @@ class PlaywrightCrawler {
             respectRobots: true,
             saveExternalAssets: false,
             singlePage: false,
-            domAssetDirectLimit: 40,
+            domAssetDirectLimit: 180,
             domAssetDirectConcurrency: 6,
             directAssetTimeoutMs: 6000,
             ...options,
@@ -119,6 +120,7 @@ class PlaywrightCrawler {
         this.onProgress = onProgress;
         this.pageMap = new Map();
         this.assetMap = new Map();
+        this.assetSourceByLocalPath = new Map();
         this.visited = new Set();
         this.failed = [];
         this.audit = {
@@ -210,9 +212,9 @@ class PlaywrightCrawler {
                 this.visited.add(currentUrl);
                 this.onProgress({ level: 'info', message: `Vizitez ${this.visited.size}/${this.options.maxPages}: ${currentUrl}` });
 
-                if (isLikelyDownloadUrl(currentUrl)) {
+                if (isLikelyDownloadUrl(currentUrl) || isLikelyAjaxDataUrl(currentUrl)) {
                     await this.downloadAssetDirect(currentUrl);
-                    this.onProgress({ level: 'info', message: `URL de download tratat ca asset: ${currentUrl}` });
+                    this.onProgress({ level: 'info', message: `URL de asset/ajax tratat direct: ${currentUrl}` });
 
                     this.ensureNotStopped();
                     const jitter = rand(this.options.delayMinMs, this.options.delayMaxMs);
@@ -264,7 +266,7 @@ class PlaywrightCrawler {
                             timeout: this.options.pageTimeoutMs,
                         });
                     } catch (error) {
-                        if (isDownloadStartingError(error) || isLikelyDownloadUrl(currentUrl)) {
+                        if (isDownloadStartingError(error) || isLikelyDownloadUrl(currentUrl) || isLikelyAjaxDataUrl(currentUrl)) {
                             await this.downloadAssetDirect(currentUrl);
                             this.onProgress({ level: 'info', message: `Endpoint download detectat, salvez direct: ${currentUrl}` });
                             continue;
@@ -329,6 +331,10 @@ class PlaywrightCrawler {
 
         this.ensureNotStopped();
 
+        await this.processAjaxPayloadAssets(startUrl);
+        await this.downloadAssetsReferencedBySavedCss(startUrl);
+        await this.rewriteSavedCssAssets(startUrl);
+
         const htmlFolder = path.join(this.options.outputDir, 'html');
         const startPagePath = this.pageMap.get(startUrl);
         const startPageFile = startPagePath
@@ -361,6 +367,7 @@ class PlaywrightCrawler {
         const proposed = resolveOutputAssetPath(this.options.outputDir, assetUrl, response);
         const finalPath = this.ensureUnique(proposed, assetUrl);
         this.assetMap.set(assetUrl, finalPath);
+        this.assetSourceByLocalPath.set(finalPath, assetUrl);
         return finalPath;
     }
 
@@ -371,12 +378,191 @@ class PlaywrightCrawler {
         return path.join(parsed.dir, `${parsed.name}-${tail}${parsed.ext}`);
     }
 
+    collectCssUrlTokens(cssText) {
+        const tokens = [];
+        const regex = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
+        let match;
+        while ((match = regex.exec(cssText)) !== null) {
+            const raw = String(match[2] || '').trim();
+            if (!raw || /^(data:|mailto:|tel:|javascript:|#)/i.test(raw)) continue;
+            tokens.push(raw);
+        }
+        return tokens;
+    }
+
+    resolveCssTokenUrl(cssAssetUrl, rawToken) {
+        try {
+            return normalizeUrl(new URL(rawToken, cssAssetUrl).toString());
+        } catch {
+            return null;
+        }
+    }
+
+    isCssAssetEntry(assetUrl, localPath) {
+        const localDir = path.basename(path.dirname(localPath)).toLowerCase();
+        if (localDir === 'css') return true;
+        try {
+            return path.extname(new URL(assetUrl).pathname || '').toLowerCase() === '.css';
+        } catch {
+            return String(localPath).toLowerCase().includes('.css');
+        }
+    }
+
+    isAjaxAssetEntry(assetUrl, localPath) {
+        if (isLikelyAjaxDataUrl(assetUrl)) return true;
+        return path.extname(localPath).toLowerCase() === '.json';
+    }
+
+    localJsonLinkForHtmlPages(localPath) {
+        return `../files/${path.basename(localPath)}`;
+    }
+
+    async processAjaxPayloadAssets(startUrl) {
+        const pending = [];
+        const queued = new Set();
+
+        for (const [assetUrl, localPath] of this.assetMap.entries()) {
+            if (!this.isAjaxAssetEntry(assetUrl, localPath)) continue;
+            pending.push(assetUrl);
+            queued.add(assetUrl);
+        }
+
+        // Expand AJAX pagination chains (load_more_url) so repeated clicks keep working.
+        while (pending.length) {
+            this.ensureNotStopped();
+            const ajaxUrl = pending.shift();
+            const localPath = this.assetMap.get(ajaxUrl);
+            if (!localPath) continue;
+
+            const raw = await fs.readFile(localPath, 'utf8').catch(() => '');
+            if (!raw) continue;
+
+            let payload;
+            try {
+                payload = JSON.parse(raw);
+            } catch {
+                continue;
+            }
+
+            const nextRaw = String(payload?.load_more_url || '').trim();
+            if (!nextRaw) continue;
+
+            let nextAbsolute;
+            try {
+                nextAbsolute = normalizeUrl(new URL(nextRaw, ajaxUrl).toString());
+            } catch {
+                continue;
+            }
+
+            if (!isSameHost(startUrl, nextAbsolute)) continue;
+            if (!isLikelyAjaxDataUrl(nextAbsolute)) continue;
+
+            await this.downloadAssetDirect(nextAbsolute);
+            if (!queued.has(nextAbsolute)) {
+                queued.add(nextAbsolute);
+                pending.push(nextAbsolute);
+            }
+        }
+
+        // Rewrite load_more_url values to local JSON files.
+        const ajaxEntries = [...this.assetMap.entries()]
+            .filter(([assetUrl, localPath]) => this.isAjaxAssetEntry(assetUrl, localPath));
+
+        for (const [ajaxUrl, localPath] of ajaxEntries) {
+            this.ensureNotStopped();
+            const raw = await fs.readFile(localPath, 'utf8').catch(() => '');
+            if (!raw) continue;
+
+            let payload;
+            try {
+                payload = JSON.parse(raw);
+            } catch {
+                continue;
+            }
+
+            const nextRaw = String(payload?.load_more_url || '').trim();
+            if (!nextRaw) continue;
+
+            let nextAbsolute;
+            try {
+                nextAbsolute = normalizeUrl(new URL(nextRaw, ajaxUrl).toString());
+            } catch {
+                continue;
+            }
+
+            if (!this.assetMap.has(nextAbsolute)) continue;
+
+            const nextLocalPath = this.assetMap.get(nextAbsolute);
+            payload.load_more_url = this.localJsonLinkForHtmlPages(nextLocalPath);
+            await fs.writeFile(localPath, JSON.stringify(payload), 'utf8');
+        }
+    }
+
+    async downloadAssetsReferencedBySavedCss(startUrl) {
+        const cssEntries = [...this.assetMap.entries()]
+            .filter(([assetUrl, localPath]) => this.isCssAssetEntry(assetUrl, localPath));
+
+        const discovered = new Set();
+        for (const [cssAssetUrl, cssLocalPath] of cssEntries) {
+            const css = await fs.readFile(cssLocalPath, 'utf8').catch(() => '');
+            if (!css) continue;
+
+            for (const token of this.collectCssUrlTokens(css)) {
+                const absolute = this.resolveCssTokenUrl(cssAssetUrl, token);
+                if (!absolute || !absolute.startsWith('http')) continue;
+                if (!isSameHost(startUrl, absolute) && !this.options.saveExternalAssets) continue;
+                if (!looksLikeAssetUrl(absolute) && !isLikelyDownloadUrl(absolute)) continue;
+                discovered.add(absolute);
+            }
+        }
+
+        for (const assetUrl of discovered) {
+            this.ensureNotStopped();
+            await this.downloadAssetDirect(assetUrl);
+        }
+    }
+
+    async rewriteSavedCssAssets(startUrl) {
+        const cssEntries = [...this.assetMap.entries()]
+            .filter(([assetUrl, localPath]) => this.isCssAssetEntry(assetUrl, localPath));
+
+        for (const [cssAssetUrl, cssLocalPath] of cssEntries) {
+            this.ensureNotStopped();
+            const css = await fs.readFile(cssLocalPath, 'utf8').catch(() => '');
+            if (!css) continue;
+
+            const rewritten = css.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (full, _quote, rawValue) => {
+                const raw = String(rawValue || '').trim();
+                if (!raw || /^(data:|mailto:|tel:|javascript:|#)/i.test(raw)) return full;
+
+                const absolute = this.resolveCssTokenUrl(cssAssetUrl, raw);
+                if (!absolute) return full;
+
+                if (this.assetMap.has(absolute)) {
+                    const localTarget = this.assetMap.get(absolute);
+                    const rel = safeRelativeLink(cssLocalPath, localTarget);
+                    return `url("${rel}")`;
+                }
+
+                if (isSameHost(startUrl, absolute)) {
+                    // Keep unresolved same-host CSS assets absolute to preserve rendering.
+                    return `url("${absolute}")`;
+                }
+
+                return full;
+            });
+
+            if (rewritten !== css) {
+                await fs.writeFile(cssLocalPath, rewritten, 'utf8');
+            }
+        }
+    }
+
     rewriteHtml(html, currentUrl, currentHtmlPath, responseAssets, startUrl) {
         const $ = cheerio.load(html);
 
         // Browsers frequently block module/crossorigin/integrity resources under file://
         // (origin is null). Dropping these attrs improves direct-open compatibility.
-        $('script[type="module"]').removeAttr('type');
         $('script[crossorigin], link[crossorigin]').removeAttr('crossorigin');
         $('script[integrity], link[integrity]').removeAttr('integrity');
 
@@ -409,7 +595,11 @@ class PlaywrightCrawler {
                 }
 
                 if (isSameHost(startUrl, absolute)) {
-                    if (looksLikeAssetUrl(absolute) || isLikelyDownloadUrl(absolute)) {
+                    if (shouldSkipLinkForCrawl(absolute)) {
+                        // Keep unresolved template placeholders as original value.
+                        return;
+                    }
+                    if (looksLikeAssetUrl(absolute) || isLikelyDownloadUrl(absolute) || isLikelyAjaxDataUrl(absolute)) {
                         // If not captured/downloaded, keep absolute URL instead of creating a fake .html page path.
                         $(el).attr(attr, absolute);
                         return;
@@ -443,6 +633,7 @@ class PlaywrightCrawler {
                 if (!isSameHost(startUrl, absolute)) return;
                 if (shouldSkipLinkForCrawl(absolute)) return;
                 if (isLikelyDownloadUrl(absolute)) return;
+                if (isLikelyAjaxDataUrl(absolute)) return;
                 links.add(absolute);
             } catch {
                 // Ignore invalid URLs.
@@ -478,7 +669,7 @@ class PlaywrightCrawler {
                 }
 
                 if (!absolute.startsWith('http')) return;
-                if (!looksLikeAssetUrl(absolute) && !isLikelyDownloadUrl(absolute)) return;
+                if (!looksLikeAssetUrl(absolute) && !isLikelyDownloadUrl(absolute) && !isLikelyAjaxDataUrl(absolute)) return;
                 if (!isSameHost(startUrl, absolute) && !this.options.saveExternalAssets) return;
                 assets.add(absolute);
             });
@@ -490,51 +681,98 @@ class PlaywrightCrawler {
     async downloadAssetDirect(assetUrl) {
         if (this.assetMap.has(assetUrl)) return;
         try {
-            const ac = new AbortController();
-            const timeout = setTimeout(() => ac.abort(), this.options.directAssetTimeoutMs);
-            const res = await fetch(assetUrl, {
-                headers: {
-                    'User-Agent': this.options.userAgent,
-                    'Accept-Language': 'ro,en;q=0.8',
-                },
-                redirect: 'follow',
-                signal: ac.signal,
-            });
-            clearTimeout(timeout);
-            if (!res.ok) return;
+            const fallbackUrl = this.localizedStaticFallbackUrl(assetUrl);
+            const candidates = fallbackUrl && fallbackUrl !== assetUrl
+                ? [assetUrl, fallbackUrl]
+                : [assetUrl];
 
-            const body = Buffer.from(await res.arrayBuffer());
-            if (!body.length) return;
+            for (const candidate of candidates) {
+                if (this.assetMap.has(candidate)) {
+                    this.assetMap.set(assetUrl, this.assetMap.get(candidate));
+                    return;
+                }
 
-            const contentType = res.headers.get('content-type') || '';
-            const mismatch = detectMimeMismatch(assetUrl, contentType);
-            if (mismatch) {
-                this.addAuditEntry('mimeMismatches', `${assetUrl}|${mismatch.contentType}`, {
-                    pageUrl: null,
-                    ...mismatch,
-                });
-            }
-            const fakeResponse = {
-                headers() {
-                    return { 'content-type': contentType };
-                },
-            };
+                const ac = new AbortController();
+                const timeout = setTimeout(() => ac.abort(), this.options.directAssetTimeoutMs);
+                const res = await fetch(candidate, {
+                    headers: {
+                        'User-Agent': this.options.userAgent,
+                        'Accept-Language': 'ro,en;q=0.8',
+                    },
+                    redirect: 'follow',
+                    signal: ac.signal,
+                }).catch(() => null);
+                clearTimeout(timeout);
 
-            const localPath = this.localAssetPath(assetUrl, fakeResponse);
-            await fs.mkdir(path.dirname(localPath), { recursive: true });
-            if (!fss.existsSync(localPath)) {
-                await fs.writeFile(localPath, body);
+                if (!res || !res.ok) continue;
+
+                const body = Buffer.from(await res.arrayBuffer());
+                if (!body.length) continue;
+
+                const contentType = res.headers.get('content-type') || '';
+                const mismatch = detectMimeMismatch(assetUrl, contentType);
+                if (mismatch) {
+                    this.addAuditEntry('mimeMismatches', `${assetUrl}|${mismatch.contentType}`, {
+                        pageUrl: null,
+                        ...mismatch,
+                    });
+                }
+                const contentDisposition = res.headers.get('content-disposition') || '';
+                const fakeResponse = {
+                    headers() {
+                        return {
+                            'content-type': contentType,
+                            'content-disposition': contentDisposition,
+                        };
+                    },
+                };
+
+                const localPath = this.localAssetPath(assetUrl, fakeResponse);
+                await fs.mkdir(path.dirname(localPath), { recursive: true });
+                if (!fss.existsSync(localPath)) {
+                    await fs.writeFile(localPath, body);
+                }
+
+                this.assetMap.set(candidate, localPath);
+                return;
             }
         } catch {
             // Direct asset download failures should not stop crawl.
         }
     }
 
+    localizedStaticFallbackUrl(assetUrl) {
+        try {
+            const url = new URL(assetUrl);
+            const fallbackPath = url.pathname.replace(/^\/([a-z]{2})(?=\/(images|img|css|js|fonts|audio|video|files)\b)/i, '');
+            if (fallbackPath === url.pathname) return null;
+            url.pathname = fallbackPath;
+            return normalizeUrl(url.toString());
+        } catch {
+            return null;
+        }
+    }
+
     async downloadDomAssets(html, currentUrl, startUrl) {
         const urls = this.collectDomAssetUrls(html, currentUrl, startUrl);
         // Keep this bounded so per-page capture stays responsive.
-        const limit = Math.min(urls.length, this.options.domAssetDirectLimit);
-        const selected = urls.slice(0, limit);
+        const priorityFor = (urlString) => {
+            if (isLikelyDownloadUrl(urlString)) return 0;
+            if (isLikelyAjaxDataUrl(urlString)) return 0;
+            try {
+                const ext = path.extname(new URL(urlString).pathname || '').toLowerCase();
+                if (['.pdf', '.zip', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx'].includes(ext)) return 1;
+                if (['.woff', '.woff2', '.ttf', '.otf', '.eot', '.svg'].includes(ext)) return 2;
+                if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico'].includes(ext)) return 3;
+                return 4;
+            } catch {
+                return 5;
+            }
+        };
+
+        const prioritized = [...urls].sort((a, b) => priorityFor(a) - priorityFor(b));
+        const limit = Math.min(prioritized.length, this.options.domAssetDirectLimit);
+        const selected = prioritized.slice(0, limit);
         let index = 0;
         const workers = Array.from({ length: Math.max(1, this.options.domAssetDirectConcurrency) }, async () => {
             while (index < selected.length) {
@@ -650,7 +888,7 @@ class PlaywrightCrawler {
                         }
 
                         if (!isSameHost(startUrl, absolute)) continue;
-                        if (!looksLikeAssetUrl(absolute) && !isLikelyDownloadUrl(absolute)) continue;
+                        if (!looksLikeAssetUrl(absolute) && !isLikelyDownloadUrl(absolute) && !isLikelyAjaxDataUrl(absolute)) continue;
                         this.addAuditEntry('missingAssets', `${pageUrl}|${absolute}`, {
                             pageUrl,
                             assetUrl: absolute,
@@ -687,6 +925,8 @@ class PlaywrightCrawler {
                         continue;
                     }
 
+                    if (shouldSkipLinkForCrawl(absolute)) continue;
+
                     if (!isSameHost(startUrl, absolute)) continue;
 
                     if (looksLikeAssetUrl(absolute) || isLikelyDownloadUrl(absolute)) {
@@ -708,6 +948,14 @@ class PlaywrightCrawler {
 
                 const localRef = resolveLocalRef(pageDir, raw);
                 if (!localRef) continue;
+                const maybeAbsolute = (() => {
+                    try {
+                        return normalizeUrl(new URL(raw, pageUrl).toString());
+                    } catch {
+                        return null;
+                    }
+                })();
+                if (maybeAbsolute && shouldSkipLinkForCrawl(maybeAbsolute)) continue;
                 const stat = await fs.stat(localRef.resolved).catch(() => null);
                 if (stat && stat.isFile()) continue;
 

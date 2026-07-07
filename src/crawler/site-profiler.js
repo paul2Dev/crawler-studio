@@ -5,6 +5,7 @@ const {
     normalizeUrl,
     isSameHost,
     isLikelyDownloadUrl,
+    isLikelyAjaxDataUrl,
     shouldSkipLinkForCrawl,
 } = require('./url-utils');
 
@@ -197,6 +198,7 @@ class SiteProfiler {
                 if (!isSameHost(startUrl, absolute)) continue;
                 if (shouldSkipLinkForCrawl(absolute)) continue;
                 if (isLikelyDownloadUrl(absolute)) continue;
+                if (isLikelyAjaxDataUrl(absolute)) continue;
                 links.add(absolute);
             } catch {
                 // Ignore malformed URLs.
