@@ -1,6 +1,21 @@
+const fs = require('fs/promises');
 const path = require('path');
 const { PlaywrightCrawler, buildCrawlerOptions } = require('./crawler/playwright-crawler');
 const { SiteProfiler, buildProfilerOptions } = require('./crawler/site-profiler');
+
+function formatJobLogLine(entry) {
+    const level = String(entry?.level || 'info').toUpperCase();
+    const ts = entry?.at ? new Date(entry.at).toISOString() : new Date().toISOString();
+    const message = String(entry?.message || '').replace(/\r?\n/g, ' ');
+    return `[${ts}] [${level}] ${message}`;
+}
+
+async function writeRunLogFile(outputDir, logs) {
+    if (!outputDir) return;
+    const lines = Array.isArray(logs) ? logs.map(formatJobLogLine) : [];
+    const content = `${lines.join('\n')}\n`;
+    await fs.writeFile(path.join(outputDir, 'run-log.txt'), content, 'utf8');
+}
 
 class JobManager {
     constructor(baseOutputDir) {
@@ -55,12 +70,15 @@ class JobManager {
             const runFolder = path.relative(this.baseOutputDir, result.outputDir).split(path.sep).join('/');
             const preferredEntry = result.startPageFile || result.archiveIndexFile || 'archive-index.html';
 
+            await writeRunLogFile(result.outputDir, job.logs);
+
             job.status = 'completed';
             job.finishedAt = new Date().toISOString();
             job.result = {
                 ...result,
                 webPath: `/runs/${runFolder}/html/${preferredEntry}`,
                 auditWebPath: `/runs/${runFolder}/run-audit.json`,
+                logWebPath: `/runs/${runFolder}/run-log.txt`,
             };
 
             return job;
@@ -73,6 +91,10 @@ class JobManager {
                 level: error.code === 'JOB_STOPPED' ? 'warn' : 'error',
                 message: error.message,
             });
+            const runOutputDir = options.outputDir;
+            if (runOutputDir) {
+                await writeRunLogFile(runOutputDir, job.logs).catch(() => { });
+            }
             throw error;
         } finally {
             this.stopHandler = null;

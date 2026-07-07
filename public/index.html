@@ -441,6 +441,7 @@
             <div class="status" id="status">Niciun job activ.</div>
             <div class="result-row">
                 <div class="result" id="result"></div>
+                <button id="copyLogBtn" type="button" class="ghost" style="display:none;">Copy Log</button>
                 <button id="exportLinksBtn" type="button" class="ghost" style="display:none;">Export linkuri
                     gasite</button>
             </div>
@@ -459,6 +460,7 @@
         const crawlBtn = document.getElementById('crawlBtn');
         const dryRunBtn = document.getElementById('dryRunBtn');
         const applyRecBtn = document.getElementById('applyRecBtn');
+        const copyLogBtn = document.getElementById('copyLogBtn');
         const exportLinksBtn = document.getElementById('exportLinksBtn');
         const stopBtn = document.getElementById('stopBtn');
         const statusEl = document.getElementById('status');
@@ -614,6 +616,41 @@
             URL.revokeObjectURL(href);
         }
 
+        async function copyLogsToClipboard() {
+            const lines = Array.from(logsEl.querySelectorAll('li')).map((li) => li.textContent || '');
+            if (lines.length === 0) {
+                resultEl.textContent = 'Nu exista log-uri de copiat in acest moment.';
+                return;
+            }
+
+            // Logs are rendered newest-first in UI; reverse to copy in chronological order.
+            const text = lines.reverse().join('\n');
+
+            try {
+                await navigator.clipboard.writeText(text);
+                resultEl.textContent = `Log copiat in clipboard (${lines.length} linii).`;
+            } catch {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.setAttribute('readonly', 'readonly');
+                textarea.style.position = 'fixed';
+                textarea.style.opacity = '0';
+                document.body.appendChild(textarea);
+                textarea.focus();
+                textarea.select();
+                let copied = false;
+                try {
+                    copied = document.execCommand('copy');
+                } catch {
+                    copied = false;
+                }
+                textarea.remove();
+                resultEl.textContent = copied
+                    ? `Log copiat in clipboard (${lines.length} linii).`
+                    : 'Nu am putut copia log-ul automat. Selecteaza si copiaza manual.';
+            }
+        }
+
         function renderAudit(audit) {
             if (!audit || !audit.counts) {
                 auditPanelEl.style.display = 'none';
@@ -747,6 +784,7 @@
                 statusEl.textContent = 'Niciun job activ.';
                 stopBtn.style.display = 'none';
                 exportLinksBtn.style.display = 'none';
+                copyLogBtn.style.display = 'none';
                 setStartButtonsEnabled(true);
                 renderAudit(null);
                 return;
@@ -755,6 +793,7 @@
             statusEl.textContent = `Job #${status.id} - ${status.status}`;
             renderLogs(status.logs || []);
             stopBtn.style.display = (status.status === 'running' || status.status === 'stopping') ? 'inline-block' : 'none';
+            copyLogBtn.style.display = (status.logs && status.logs.length > 0) ? 'inline-block' : 'none';
 
             if (status.status === 'running') {
                 setStartButtonsEnabled(false);
@@ -789,7 +828,10 @@
                 const auditSummary = counts
                     ? ` | Audit: asset-uri lipsa ${counts.missingAssets}, linkuri rupte ${counts.brokenInternalLinks}, redirectionari ${counts.redirects}, MIME mismatch ${counts.mimeMismatches}`
                     : '';
-                resultEl.innerHTML = `Terminat: ${status.result.totalVisited} pagini, ${status.result.totalFailed} erori.${auditSummary} <a href="${status.result.webPath}" target="_blank" rel="noreferrer">Deschide arhiva</a>`;
+                const logLink = status.result.logWebPath
+                    ? ` | <a href="${status.result.logWebPath}" target="_blank" rel="noreferrer">Log text</a>`
+                    : '';
+                resultEl.innerHTML = `Terminat: ${status.result.totalVisited} pagini, ${status.result.totalFailed} erori.${auditSummary} <a href="${status.result.webPath}" target="_blank" rel="noreferrer">Deschide arhiva</a>${logLink}`;
                 renderAudit(status.result.audit || null);
             } else if (status.status === 'stopped' && status.result) {
                 setStartButtonsEnabled(true);
@@ -864,6 +906,7 @@
             resultEl.textContent = 'Recomandarile au fost aplicate in formular.';
         });
 
+        copyLogBtn.addEventListener('click', copyLogsToClipboard);
         exportLinksBtn.addEventListener('click', exportDiscoveredLinks);
 
         stopBtn.addEventListener('click', async () => {

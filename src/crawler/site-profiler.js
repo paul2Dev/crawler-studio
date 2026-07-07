@@ -1,7 +1,12 @@
 const { chromium } = require('playwright');
 
 const { loadRobotsPolicy } = require('./robots');
-const { normalizeUrl, isSameHost } = require('./url-utils');
+const {
+    normalizeUrl,
+    isSameHost,
+    isLikelyDownloadUrl,
+    shouldSkipLinkForCrawl,
+} = require('./url-utils');
 
 const DEFAULT_UA = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
@@ -189,7 +194,10 @@ class SiteProfiler {
         for (const href of hrefs) {
             try {
                 const absolute = normalizeUrl(new URL(href, currentUrl).toString());
-                if (isSameHost(startUrl, absolute)) links.add(absolute);
+                if (!isSameHost(startUrl, absolute)) continue;
+                if (shouldSkipLinkForCrawl(absolute)) continue;
+                if (isLikelyDownloadUrl(absolute)) continue;
+                links.add(absolute);
             } catch {
                 // Ignore malformed URLs.
             }

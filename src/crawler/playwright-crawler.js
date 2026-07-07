@@ -9,6 +9,8 @@ const { loadRobotsPolicy } = require('./robots');
 const {
     normalizeUrl,
     isSameHost,
+    isLikelyDownloadUrl,
+    shouldSkipLinkForCrawl,
     htmlFileNameFor,
     resolveOutputAssetPath,
     safeRelativeLink,
@@ -43,6 +45,11 @@ function looksLikeAssetUrl(urlString) {
 
 function normalizeHeaderValue(value) {
     return String(value || '').toLowerCase().split(';')[0].trim();
+}
+
+function isDownloadStartingError(error) {
+    const message = String(error?.message || '').toLowerCase();
+    return message.includes('download is starting');
 }
 
 function detectMimeMismatch(urlString, contentType) {
@@ -191,6 +198,10 @@ class PlaywrightCrawler {
 
                 if (this.visited.has(currentUrl)) continue;
                 if (current.depth > this.options.maxDepth) continue;
+                if (shouldSkipLinkForCrawl(currentUrl)) {
+                    this.onProgress({ level: 'warn', message: `Ignor URL template invalid: ${currentUrl}` });
+                    continue;
+                }
                 if (!robots.canFetch(currentUrl)) {
                     this.onProgress({ level: 'warn', message: `Blocat de robots.txt: ${currentUrl}` });
                     continue;
@@ -198,6 +209,16 @@ class PlaywrightCrawler {
 
                 this.visited.add(currentUrl);
                 this.onProgress({ level: 'info', message: `Vizitez ${this.visited.size}/${this.options.maxPages}: ${currentUrl}` });
+
+                if (isLikelyDownloadUrl(currentUrl)) {
+                    await this.downloadAssetDirect(currentUrl);
+                    this.onProgress({ level: 'info', message: `URL de download tratat ca asset: ${currentUrl}` });
+
+                    this.ensureNotStopped();
+                    const jitter = rand(this.options.delayMinMs, this.options.delayMaxMs);
+                    await sleep(Math.max(jitter, robots.crawlDelayMs || 0));
+                    continue;
+                }
 
                 const page = await this.context.newPage();
                 const responseAssets = new Map();
@@ -237,10 +258,19 @@ class PlaywrightCrawler {
 
                 try {
                     this.ensureNotStopped();
-                    await page.goto(currentUrl, {
-                        waitUntil: 'domcontentloaded',
-                        timeout: this.options.pageTimeoutMs,
-                    });
+                    try {
+                        await page.goto(currentUrl, {
+                            waitUntil: 'domcontentloaded',
+                            timeout: this.options.pageTimeoutMs,
+                        });
+                    } catch (error) {
+                        if (isDownloadStartingError(error) || isLikelyDownloadUrl(currentUrl)) {
+                            await this.downloadAssetDirect(currentUrl);
+                            this.onProgress({ level: 'info', message: `Endpoint download detectat, salvez direct: ${currentUrl}` });
+                            continue;
+                        }
+                        throw error;
+                    }
 
                     const finalUrl = normalizeUrl(page.url());
                     if (finalUrl !== currentUrl) {
@@ -379,7 +409,7 @@ class PlaywrightCrawler {
                 }
 
                 if (isSameHost(startUrl, absolute)) {
-                    if (looksLikeAssetUrl(absolute)) {
+                    if (looksLikeAssetUrl(absolute) || isLikelyDownloadUrl(absolute)) {
                         // If not captured/downloaded, keep absolute URL instead of creating a fake .html page path.
                         $(el).attr(attr, absolute);
                         return;
@@ -410,7 +440,10 @@ class PlaywrightCrawler {
 
             try {
                 const absolute = normalizeUrl(new URL(href, currentUrl).toString());
-                if (isSameHost(startUrl, absolute)) links.add(absolute);
+                if (!isSameHost(startUrl, absolute)) return;
+                if (shouldSkipLinkForCrawl(absolute)) return;
+                if (isLikelyDownloadUrl(absolute)) return;
+                links.add(absolute);
             } catch {
                 // Ignore invalid URLs.
             }
@@ -445,7 +478,7 @@ class PlaywrightCrawler {
                 }
 
                 if (!absolute.startsWith('http')) return;
-                if (!looksLikeAssetUrl(absolute)) return;
+                if (!looksLikeAssetUrl(absolute) && !isLikelyDownloadUrl(absolute)) return;
                 if (!isSameHost(startUrl, absolute) && !this.options.saveExternalAssets) return;
                 assets.add(absolute);
             });
@@ -616,7 +649,8 @@ class PlaywrightCrawler {
                             continue;
                         }
 
-                        if (!isSameHost(startUrl, absolute) || !looksLikeAssetUrl(absolute)) continue;
+                        if (!isSameHost(startUrl, absolute)) continue;
+                        if (!looksLikeAssetUrl(absolute) && !isLikelyDownloadUrl(absolute)) continue;
                         this.addAuditEntry('missingAssets', `${pageUrl}|${absolute}`, {
                             pageUrl,
                             assetUrl: absolute,
@@ -655,7 +689,7 @@ class PlaywrightCrawler {
 
                     if (!isSameHost(startUrl, absolute)) continue;
 
-                    if (looksLikeAssetUrl(absolute)) {
+                    if (looksLikeAssetUrl(absolute) || isLikelyDownloadUrl(absolute)) {
                         this.addAuditEntry('missingAssets', `${pageUrl}|${absolute}`, {
                             pageUrl,
                             assetUrl: absolute,

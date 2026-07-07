@@ -1,5 +1,49 @@
 const path = require('path');
 
+function sanitizePathSegment(segment) {
+    const cleaned = String(segment || '')
+        .replace(/[^a-zA-Z0-9._-]/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^[-.]+|[-.]+$/g, '');
+    return cleaned || 'page';
+}
+
+function hasTemplatePathSegment(url) {
+    const segments = String(url.pathname || '')
+        .split('/')
+        .filter(Boolean);
+    return segments.some((seg) => seg.startsWith(':'));
+}
+
+function isLikelyDownloadUrl(urlString) {
+    try {
+        const url = new URL(urlString);
+        const pathname = String(url.pathname || '').toLowerCase();
+
+        if (/\/downloader?-/.test(pathname)) return true;
+        if (/\/download(?:\/|$)/.test(pathname)) return true;
+        if (/\/attachment(?:\/|$)/.test(pathname)) return true;
+        if (/\/library-content\//.test(pathname)) return true;
+
+        if (url.searchParams.has('url_parse')) return true;
+        if (url.searchParams.has('download')) return true;
+        if (url.searchParams.has('attachment')) return true;
+
+        return false;
+    } catch {
+        return false;
+    }
+}
+
+function shouldSkipLinkForCrawl(urlString) {
+    try {
+        const url = new URL(urlString);
+        return hasTemplatePathSegment(url);
+    } catch {
+        return true;
+    }
+}
+
 function normalizeUrl(rawUrl) {
     const url = new URL(rawUrl);
     url.hash = '';
@@ -25,7 +69,12 @@ function htmlFileNameFor(urlString) {
         return `index${querySuffix}.html`;
     }
 
-    const normalized = cleanPath.replace(/^\//, '').replace(/\//g, '-');
+    const normalized = cleanPath
+        .replace(/^\//, '')
+        .split('/')
+        .filter(Boolean)
+        .map(sanitizePathSegment)
+        .join('-');
     return `${normalized}${querySuffix}.html`;
 }
 
@@ -60,6 +109,8 @@ function safeRelativeLink(fromHtmlPath, toPath) {
 module.exports = {
     normalizeUrl,
     isSameHost,
+    isLikelyDownloadUrl,
+    shouldSkipLinkForCrawl,
     htmlFileNameFor,
     resolveOutputAssetPath,
     safeRelativeLink,
