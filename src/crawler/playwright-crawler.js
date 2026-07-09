@@ -354,6 +354,7 @@ class PlaywrightCrawler {
         await this.processAjaxPayloadAssets(startUrl);
         await this.downloadAssetsReferencedBySavedCss(startUrl);
         await this.rewriteSavedCssAssets(startUrl);
+        await this.writeOfflineAjaxMap();
 
         const htmlFolder = path.join(this.options.outputDir, 'html');
         const startPagePath = this.pageMap.get(startUrl);
@@ -732,6 +733,8 @@ class PlaywrightCrawler {
 
         // Browsers frequently block module/crossorigin/integrity resources under file://
         // (origin is null). Dropping these attrs improves direct-open compatibility.
+        $('script[type="module"]').removeAttr('type');
+        $('script[nomodule]').removeAttr('nomodule');
         $('script[crossorigin], link[crossorigin]').removeAttr('crossorigin');
         $('script[integrity], link[integrity]').removeAttr('integrity');
 
@@ -786,7 +789,163 @@ class PlaywrightCrawler {
         rewrite('video[src]', 'src');
         rewrite('audio[src]', 'src');
 
+        // Enable offline JSON-backed AJAX flows (load-more, category filters, etc.) on file://.
+        if ($('#copilot-offline-ajax-bootstrap').length === 0) {
+            $('body').append(this.offlineAjaxBootstrapHtml());
+        }
+
         return $.html();
+    }
+
+    async writeOfflineAjaxMap() {
+        const filesDir = path.join(this.options.outputDir, 'files');
+        const map = {};
+
+        const entries = await fs.readdir(filesDir).catch(() => []);
+        for (const fileName of entries) {
+            if (!fileName.toLowerCase().endsWith('.json')) continue;
+
+            const filePath = path.join(filesDir, fileName);
+            const raw = await fs.readFile(filePath, 'utf8').catch(() => '');
+            if (!raw) continue;
+
+            try {
+                const parsed = JSON.parse(raw);
+                map[`/files/${fileName}`] = parsed;
+            } catch {
+                // Keep map generation resilient when some JSON files are malformed.
+            }
+        }
+
+        const outFile = path.join(filesDir, 'offline-ajax-map.js');
+        const content = `window.__OFFLINE_AJAX_MAP__ = ${JSON.stringify(map)};\n`;
+        await fs.writeFile(outFile, content, 'utf8');
+    }
+
+    offlineAjaxBootstrapHtml() {
+        return [
+            '<script src="../files/offline-ajax-map.js"></script>',
+            '<script id="copilot-offline-ajax-bootstrap">',
+            '(function(){',
+            'if(location.protocol!=="file:")return;',
+            'var w=window;',
+            'var map=w.__OFFLINE_AJAX_MAP__||{};',
+            'function keyFromPath(pathValue){',
+            'var path=String(pathValue||"").replace(/\\\\/g,"/");',
+            'path=path.split("?")[0].split("#")[0];',
+            'var lower=path.toLowerCase();',
+            'var marker="/files/";',
+            'var idx=lower.lastIndexOf(marker);',
+            'if(idx===-1)return"";',
+            'var rest=path.slice(idx+marker.length);',
+            'if(!rest)return"";',
+            'var fileName=rest.split("/")[0];',
+            'if(!fileName)return"";',
+            'return"/files/"+fileName;',
+            '}',
+            'function keyFromUrl(input){',
+            'var str=String(input||"").trim();',
+            'if(!str)return"";',
+            'var fromRaw=keyFromPath(str);',
+            'if(fromRaw)return fromRaw;',
+            'try{',
+            'var u=new URL(str,location.href);',
+            'var fromAbs=keyFromPath(u.pathname||"");',
+            'if(fromAbs)return fromAbs;',
+            '}catch(e){}',
+            'return"";',
+            '}',
+            'function payloadFor(input){',
+            'var key=keyFromUrl(input);',
+            'if(!key)return null;',
+            'return Object.prototype.hasOwnProperty.call(map,key)?map[key]:null;',
+            '}',
+            'function clonePayload(payload){',
+            'if(payload===null||payload===undefined)return payload;',
+            'return JSON.parse(JSON.stringify(payload));',
+            '}',
+            'if(typeof w.fetch==="function"){',
+            'var nativeFetch=w.fetch.bind(w);',
+            'w.fetch=function(input,init){',
+            'var reqUrl=(typeof input==="string"?input:(input&&input.url)||"");',
+            'var payload=payloadFor(reqUrl);',
+            'if(payload===null)return nativeFetch(input,init);',
+            'var body=JSON.stringify(payload);',
+            'if(typeof Response!=="undefined"){',
+            'return Promise.resolve(new Response(body,{status:200,headers:{"Content-Type":"application/json"}}));',
+            '}',
+            'return Promise.resolve({ok:true,status:200,json:function(){return Promise.resolve(clonePayload(payload));},text:function(){return Promise.resolve(body);}});',
+            '};',
+            '}',
+            'if(w.XMLHttpRequest&&w.XMLHttpRequest.prototype){',
+            'var nativeOpen=w.XMLHttpRequest.prototype.open;',
+            'var nativeSend=w.XMLHttpRequest.prototype.send;',
+            'var nativeSetHeader=w.XMLHttpRequest.prototype.setRequestHeader;',
+            'w.XMLHttpRequest.prototype.open=function(method,url,async,user,password){',
+            'var payload=payloadFor(url);',
+            'if(payload!==null){',
+            'this.__offlinePayload=payload;',
+            'this.__offlineUrl=String(url||"");',
+            'this.readyState=1;',
+            'return;',
+            '}',
+            'this.__offlinePayload=undefined;',
+            'return nativeOpen.call(this,method,url,async,user,password);',
+            '};',
+            'w.XMLHttpRequest.prototype.setRequestHeader=function(name,value){',
+            'if(this.__offlinePayload!==undefined)return;',
+            'return nativeSetHeader.call(this,name,value);',
+            '};',
+            'w.XMLHttpRequest.prototype.send=function(body){',
+            'if(this.__offlinePayload===undefined){',
+            'return nativeSend.call(this,body);',
+            '}',
+            'var self=this;',
+            'var text=JSON.stringify(self.__offlinePayload);',
+            'setTimeout(function(){',
+            'self.status=200;',
+            'self.statusText="OK";',
+            'self.responseURL=self.__offlineUrl||"";',
+            'self.responseText=text;',
+            'self.response=text;',
+            'self.readyState=4;',
+            'self.getResponseHeader=function(name){',
+            'if(!name)return null;',
+            'return String(name).toLowerCase()==="content-type"?"application/json":null;',
+            '};',
+            'self.getAllResponseHeaders=function(){',
+            'return "content-type: application/json\\r\\n";',
+            '};',
+            'if(typeof self.onreadystatechange==="function")self.onreadystatechange();',
+            'if(typeof self.onload==="function")self.onload();',
+            '},0);',
+            '};',
+            '}',
+            'var $=w.jQuery;',
+            'if($&&typeof $.ajax==="function"){',
+            'var originalAjax=$.ajax.bind($);',
+            '$.ajax=function(urlOrOptions,maybeOptions){',
+            'var options={};',
+            'var requestUrl="";',
+            'if(typeof urlOrOptions==="string"){requestUrl=urlOrOptions;options=maybeOptions||{};}else{options=urlOrOptions||{};requestUrl=options.url||"";}',
+            'var payload=payloadFor(requestUrl);',
+            'if(payload===null)return originalAjax(urlOrOptions,maybeOptions);',
+            'var data=clonePayload(payload);',
+            'setTimeout(function(){',
+            'if(typeof options.success==="function")options.success(data,"success",null);',
+            'if(typeof options.complete==="function")options.complete(null,"success");',
+            '},0);',
+            'if(typeof $.Deferred==="function"){',
+            'var d=$.Deferred();',
+            'd.resolve(data,"success",null);',
+            'return d.promise();',
+            '}',
+            'return Promise.resolve(data);',
+            '};',
+            '}',
+            '})();',
+            '</script>',
+        ].join('');
     }
 
     extractLinks(html, currentUrl, startUrl) {
