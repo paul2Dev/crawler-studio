@@ -12,6 +12,7 @@ const {
     isLikelyDownloadUrl,
     isLikelyAjaxDataUrl,
     shouldSkipLinkForCrawl,
+    getSkipReasonForCrawl,
     htmlFileNameFor,
     resolveOutputAssetPath,
     safeRelativeLink,
@@ -191,9 +192,23 @@ class PlaywrightCrawler {
         });
 
         const queue = [{ url: startUrl, depth: 0 }];
+        let ajaxExpansionDone = this.options.singlePage;
 
         try {
-            while (queue.length && this.visited.size < this.options.maxPages) {
+            while ((queue.length || !ajaxExpansionDone) && this.visited.size < this.options.maxPages) {
+                if (!queue.length && !ajaxExpansionDone) {
+                    const discoveredFromAjax = await this.processAjaxPayloadAssets(startUrl);
+                    for (const link of discoveredFromAjax) {
+                        if (!this.visited.has(link)) {
+                            queue.push({ url: link, depth: 1 });
+                        }
+                    }
+                    ajaxExpansionDone = true;
+                    if (!queue.length) {
+                        break;
+                    }
+                }
+
                 this.ensureNotStopped();
                 const current = queue.shift();
                 const currentUrl = normalizeUrl(current.url);
@@ -201,7 +216,11 @@ class PlaywrightCrawler {
                 if (this.visited.has(currentUrl)) continue;
                 if (current.depth > this.options.maxDepth) continue;
                 if (shouldSkipLinkForCrawl(currentUrl)) {
-                    this.onProgress({ level: 'warn', message: `Ignor URL template invalid: ${currentUrl}` });
+                    const skipReason = getSkipReasonForCrawl(currentUrl) || 'unknown';
+                    this.onProgress({
+                        level: 'warn',
+                        message: `Ignor URL invalid (${skipReason}): ${currentUrl}`,
+                    });
                     continue;
                 }
                 if (!robots.canFetch(currentUrl)) {
@@ -331,6 +350,7 @@ class PlaywrightCrawler {
 
         this.ensureNotStopped();
 
+        // Keep offline load-more chains functional for already captured AJAX payloads.
         await this.processAjaxPayloadAssets(startUrl);
         await this.downloadAssetsReferencedBySavedCss(startUrl);
         await this.rewriteSavedCssAssets(startUrl);
@@ -417,9 +437,152 @@ class PlaywrightCrawler {
         return `../files/${path.basename(localPath)}`;
     }
 
+    linkFromHtmlFolder(localPath) {
+        const htmlFolder = path.join(this.options.outputDir, 'html');
+        return path.relative(htmlFolder, localPath).split(path.sep).join('/');
+    }
+
+    normalizeInternalPageUrl(raw, currentUrl, startUrl) {
+        const value = String(raw || '').trim();
+        if (!value || /^(#|data:|mailto:|tel:|javascript:)/i.test(value)) return null;
+
+        let absolute;
+        try {
+            absolute = normalizeUrl(new URL(value, currentUrl).toString());
+        } catch {
+            return null;
+        }
+
+        if (!isSameHost(startUrl, absolute)) return null;
+        if (shouldSkipLinkForCrawl(absolute)) return null;
+        if (looksLikeAssetUrl(absolute)) return null;
+        if (isLikelyDownloadUrl(absolute)) return null;
+        if (isLikelyAjaxDataUrl(absolute)) return null;
+        return absolute;
+    }
+
+    collectLinksFromAjaxPayloadValue(value, ajaxUrl, startUrl, links) {
+        if (typeof value === 'string') {
+            const raw = value.trim();
+            if (!raw) return;
+
+            if (/<a\b[^>]*href\s*=|<a\b/i.test(raw)) {
+                const extracted = this.extractLinks(raw, ajaxUrl, startUrl);
+                for (const link of extracted) {
+                    links.add(link);
+                }
+                return;
+            }
+
+            const maybeLink = this.normalizeInternalPageUrl(raw, ajaxUrl, startUrl);
+            if (maybeLink) {
+                links.add(maybeLink);
+            }
+            return;
+        }
+
+        if (Array.isArray(value)) {
+            for (const item of value) {
+                this.collectLinksFromAjaxPayloadValue(item, ajaxUrl, startUrl, links);
+            }
+            return;
+        }
+
+        if (value && typeof value === 'object') {
+            for (const nested of Object.values(value)) {
+                this.collectLinksFromAjaxPayloadValue(nested, ajaxUrl, startUrl, links);
+            }
+        }
+    }
+
+    rewriteAjaxHtmlFragment(fragmentHtml, ajaxUrl, startUrl) {
+        if (typeof fragmentHtml !== 'string' || !fragmentHtml.trim()) return fragmentHtml;
+        const $ = cheerio.load(fragmentHtml);
+
+        const rewrite = (selector, attr) => {
+            $(selector).each((_, el) => {
+                const raw = ($(el).attr(attr) || '').trim();
+                if (!raw || /^(#|data:|mailto:|tel:|javascript:)/i.test(raw)) return;
+
+                // Avoid double-rewriting links that already target local exported files.
+                if (/^(?:\.\.\/|\.\/|\/)?(?:en-)?article-[^/?#]+\.html(?:[?#].*)?$/i.test(raw)) return;
+                if (/^(?:\.\.\/|\.\/).*\.(?:html|css|js|png|jpe?g|gif|webp|svg|woff2?|ttf|otf|mp4|mp3|json)(?:[?#].*)?$/i.test(raw)) return;
+
+                let absolute;
+                try {
+                    absolute = normalizeUrl(new URL(raw, ajaxUrl).toString());
+                } catch {
+                    return;
+                }
+
+                if (this.pageMap.has(absolute)) {
+                    $(el).attr(attr, this.linkFromHtmlFolder(this.pageMap.get(absolute)));
+                    return;
+                }
+
+                if (this.assetMap.has(absolute)) {
+                    $(el).attr(attr, this.linkFromHtmlFolder(this.assetMap.get(absolute)));
+                    return;
+                }
+
+                if (!isSameHost(startUrl, absolute)) {
+                    return;
+                }
+
+                if (shouldSkipLinkForCrawl(absolute)) {
+                    return;
+                }
+
+                if (looksLikeAssetUrl(absolute) || isLikelyDownloadUrl(absolute) || isLikelyAjaxDataUrl(absolute)) {
+                    return;
+                }
+
+                $(el).attr(attr, htmlFileNameFor(absolute));
+            });
+        };
+
+        rewrite('a[href]', 'href');
+        rewrite('img[src]', 'src');
+        rewrite('source[src]', 'src');
+        rewrite('video[src]', 'src');
+        rewrite('audio[src]', 'src');
+
+        return $('body').html() || $.root().html() || fragmentHtml;
+    }
+
+    rewriteAjaxPayloadValue(value, ajaxUrl, startUrl) {
+        if (typeof value === 'string') {
+            const raw = value.trim();
+            if (!raw) return value;
+
+            if (/<a\b[^>]*href\s*=|<img\b|<source\b|<video\b|<audio\b|<div\b|<section\b/i.test(raw)) {
+                return this.rewriteAjaxHtmlFragment(value, ajaxUrl, startUrl);
+            }
+
+            return value;
+        }
+
+        if (Array.isArray(value)) {
+            for (let i = 0; i < value.length; i += 1) {
+                value[i] = this.rewriteAjaxPayloadValue(value[i], ajaxUrl, startUrl);
+            }
+            return value;
+        }
+
+        if (value && typeof value === 'object') {
+            for (const key of Object.keys(value)) {
+                value[key] = this.rewriteAjaxPayloadValue(value[key], ajaxUrl, startUrl);
+            }
+            return value;
+        }
+
+        return value;
+    }
+
     async processAjaxPayloadAssets(startUrl) {
         const pending = [];
         const queued = new Set();
+        const discoveredLinks = new Set();
 
         for (const [assetUrl, localPath] of this.assetMap.entries()) {
             if (!this.isAjaxAssetEntry(assetUrl, localPath)) continue;
@@ -443,6 +606,8 @@ class PlaywrightCrawler {
             } catch {
                 continue;
             }
+
+            this.collectLinksFromAjaxPayloadValue(payload, ajaxUrl, startUrl, discoveredLinks);
 
             const nextRaw = String(payload?.load_more_url || '').trim();
             if (!nextRaw) continue;
@@ -481,21 +646,25 @@ class PlaywrightCrawler {
             }
 
             const nextRaw = String(payload?.load_more_url || '').trim();
-            if (!nextRaw) continue;
+            if (nextRaw) {
+                let nextAbsolute;
+                try {
+                    nextAbsolute = normalizeUrl(new URL(nextRaw, ajaxUrl).toString());
+                } catch {
+                    nextAbsolute = null;
+                }
 
-            let nextAbsolute;
-            try {
-                nextAbsolute = normalizeUrl(new URL(nextRaw, ajaxUrl).toString());
-            } catch {
-                continue;
+                if (nextAbsolute && this.assetMap.has(nextAbsolute)) {
+                    const nextLocalPath = this.assetMap.get(nextAbsolute);
+                    payload.load_more_url = this.localJsonLinkForHtmlPages(nextLocalPath);
+                }
             }
 
-            if (!this.assetMap.has(nextAbsolute)) continue;
-
-            const nextLocalPath = this.assetMap.get(nextAbsolute);
-            payload.load_more_url = this.localJsonLinkForHtmlPages(nextLocalPath);
+            payload = this.rewriteAjaxPayloadValue(payload, ajaxUrl, startUrl);
             await fs.writeFile(localPath, JSON.stringify(payload), 'utf8');
         }
+
+        return [...discoveredLinks];
     }
 
     async downloadAssetsReferencedBySavedCss(startUrl) {

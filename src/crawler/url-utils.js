@@ -65,6 +65,35 @@ function hasTemplatePathSegment(url) {
     return segments.some((seg) => seg.startsWith(':'));
 }
 
+function hasInjectedHtmlMarkers(url) {
+    const rawPath = String(url.pathname || '');
+    const rawQuery = String(url.search || '');
+    const lowerCombined = `${rawPath}${rawQuery}`.toLowerCase();
+
+    // Encoded HTML markers typically indicate a broken href that captured DOM fragments.
+    if (lowerCombined.includes('%3c') || lowerCombined.includes('%3e')) return true;
+
+    const decoded = (() => {
+        try {
+            return decodeURIComponent(`${rawPath}${rawQuery}`);
+        } catch {
+            return `${rawPath}${rawQuery}`;
+        }
+    })().toLowerCase();
+
+    if (/[<>]/.test(decoded)) return true;
+    if (/(?:\bclass\s*=|\bdata-target\s*=|\bmodal\b|<\/?div\b)/i.test(decoded)) return true;
+    return false;
+}
+
+function hasSuspiciousPathLength(url) {
+    const pathname = String(url.pathname || '');
+    if (pathname.length > 1024) return true;
+
+    const segments = pathname.split('/').filter(Boolean);
+    return segments.some((seg) => seg.length > 220);
+}
+
 function isLikelyDownloadUrl(urlString) {
     try {
         const url = new URL(urlString);
@@ -103,11 +132,18 @@ function isLikelyAjaxDataUrl(urlString) {
 }
 
 function shouldSkipLinkForCrawl(urlString) {
+    return getSkipReasonForCrawl(urlString) !== null;
+}
+
+function getSkipReasonForCrawl(urlString) {
     try {
         const url = new URL(urlString);
-        return hasTemplatePathSegment(url);
+        if (hasTemplatePathSegment(url)) return 'template-path';
+        if (hasInjectedHtmlMarkers(url)) return 'html-fragment-in-url';
+        if (hasSuspiciousPathLength(url)) return 'suspicious-path-length';
+        return null;
     } catch {
-        return true;
+        return 'invalid-url';
     }
 }
 
@@ -189,6 +225,7 @@ module.exports = {
     isLikelyDownloadUrl,
     isLikelyAjaxDataUrl,
     shouldSkipLinkForCrawl,
+    getSkipReasonForCrawl,
     htmlFileNameFor,
     resolveOutputAssetPath,
     safeRelativeLink,

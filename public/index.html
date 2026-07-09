@@ -214,6 +214,49 @@
             white-space: nowrap;
         }
 
+        .audit-count-btn {
+            border: 1px solid #a7b7b0;
+            background: #f0fbf8;
+            color: #145a4f;
+            border-radius: 999px;
+            padding: 4px 10px;
+            font-size: .9rem;
+            font-weight: 700;
+            cursor: pointer;
+            min-width: 52px;
+            text-align: center;
+        }
+
+        .audit-count-btn:hover {
+            background: #ddf3ee;
+        }
+
+        .audit-count-btn.active {
+            border-color: #0f766e;
+            background: #c9efe6;
+            color: #0f524c;
+        }
+
+        .audit-detail {
+            margin-top: 10px;
+            border: 1px solid #ded5c7;
+            border-radius: 10px;
+            background: #fffdf8;
+            padding: 10px;
+            display: none;
+        }
+
+        .audit-detail h4 {
+            margin: 0 0 8px;
+            font-size: .92rem;
+            color: #3f3a33;
+        }
+
+        .audit-detail-empty {
+            color: #5f5a52;
+            font-size: .84rem;
+        }
+
         .audit-legend {
             margin-top: 8px;
             font-size: .8rem;
@@ -476,6 +519,36 @@
         let latestRecommendations = null;
         let latestDryRunLinks = [];
         let latestDryRunStartUrl = '';
+        let selectedAuditCategory = 'missingAssets';
+        let selectionHoldUntil = 0;
+
+        function nowMs() {
+            return Date.now();
+        }
+
+        function bumpSelectionHold(extraMs = 2500) {
+            selectionHoldUntil = Math.max(selectionHoldUntil, nowMs() + extraMs);
+        }
+
+        function hasSelectionInside(container) {
+            const sel = window.getSelection ? window.getSelection() : null;
+            if (!sel || sel.rangeCount === 0) return false;
+            if (!String(sel).trim()) return false;
+
+            const anchor = sel.anchorNode;
+            const focus = sel.focusNode;
+            const containsNode = (node) => {
+                if (!node || !container) return false;
+                return container.contains(node.nodeType === Node.TEXT_NODE ? node.parentElement : node);
+            };
+
+            return containsNode(anchor) || containsNode(focus);
+        }
+
+        function shouldPauseAutoRerender() {
+            if (nowMs() < selectionHoldUntil) return true;
+            return hasSelectionInside(logsEl) || hasSelectionInside(auditPanelEl);
+        }
 
         const CRAWL_DELAY_MIN_RECOMMENDED = 700;
         const CRAWL_DELAY_MAX_RECOMMENDED = 1500;
@@ -651,12 +724,158 @@
             }
         }
 
-        function renderAudit(audit) {
+        function renderAudit(audit, context = {}) {
             if (!audit || !audit.counts) {
                 auditPanelEl.style.display = 'none';
                 auditPanelEl.innerHTML = '';
                 return;
             }
+
+            const escapeHtml = (value) => String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+
+            const detailConfig = {
+                missingAssets: {
+                    label: 'Asset-uri lipsa',
+                    columns: [
+                        { key: 'pageUrl', label: 'Pagina', preferLocalLink: true },
+                        { key: 'assetUrl', label: 'Asset URL' },
+                        { key: 'source', label: 'Sursa' },
+                        { key: 'reason', label: 'Motiv' },
+                    ],
+                },
+                brokenInternalLinks: {
+                    label: 'Linkuri interne rupte',
+                    columns: [
+                        { key: 'pageUrl', label: 'Pagina', preferLocalLink: true },
+                        { key: 'targetUrl', label: 'Target', preferLocalLink: true },
+                        { key: 'reason', label: 'Motiv' },
+                    ],
+                },
+                redirects: {
+                    label: 'Redirectionari',
+                    columns: [
+                        { key: 'from', label: 'De la', preferLocalLink: true },
+                        { key: 'to', label: 'Catre', preferLocalLink: true },
+                    ],
+                },
+                mimeMismatches: {
+                    label: 'MIME mismatch',
+                    columns: [
+                        { key: 'pageUrl', label: 'Pagina', preferLocalLink: true },
+                        { key: 'url', label: 'URL' },
+                        { key: 'extension', label: 'Extensie' },
+                        { key: 'contentType', label: 'Content-Type primit' },
+                        { key: 'expected', label: 'Content-Type asteptat' },
+                    ],
+                },
+            };
+
+            const runHtmlBase = String(context.runHtmlBase || '');
+            const startUrl = String(context.startUrl || '');
+
+            const sanitizePathSegment = (segment) => {
+                const cleaned = String(segment || '')
+                    .replace(/[^a-zA-Z0-9._-]/g, '-')
+                    .replace(/-+/g, '-')
+                    .replace(/^[-.]+|[-.]+$/g, '');
+                return cleaned || 'page';
+            };
+
+            const toBase64Url = (value) => {
+                const bytes = new TextEncoder().encode(String(value || ''));
+                let bin = '';
+                for (const b of bytes) {
+                    bin += String.fromCharCode(b);
+                }
+                return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+            };
+
+            const htmlFileNameForUrl = (urlString) => {
+                let parsed;
+                try {
+                    parsed = new URL(urlString);
+                } catch {
+                    return null;
+                }
+
+                const cleanPath = parsed.pathname.replace(/\/+$/, '') || '/';
+                const querySuffix = parsed.search ? `-${toBase64Url(parsed.search).slice(0, 12)}` : '';
+
+                if (cleanPath === '/') {
+                    return `index${querySuffix}.html`;
+                }
+
+                const normalized = cleanPath
+                    .replace(/^\//, '')
+                    .split('/')
+                    .filter(Boolean)
+                    .map(sanitizePathSegment)
+                    .join('-');
+
+                return `${normalized}${querySuffix}.html`;
+            };
+
+            const canUseLocalPageLink = (rawUrl) => {
+                if (!runHtmlBase || !startUrl) return false;
+
+                let candidate;
+                let base;
+                try {
+                    candidate = new URL(String(rawUrl || ''));
+                    base = new URL(startUrl);
+                } catch {
+                    return false;
+                }
+
+                if (!/^https?:$/i.test(candidate.protocol)) return false;
+                if (candidate.protocol !== base.protocol || candidate.host !== base.host) return false;
+
+                const extMatch = (candidate.pathname || '').match(/\.([a-z0-9]+)$/i);
+                if (extMatch && !['html', 'htm'].includes(String(extMatch[1] || '').toLowerCase())) {
+                    return false;
+                }
+
+                return true;
+            };
+
+            const renderCellValue = (value, column) => {
+                const text = Array.isArray(value) ? value.join(', ') : value;
+                const raw = String(text ?? '');
+                if (column && column.preferLocalLink && canUseLocalPageLink(raw)) {
+                    const fileName = htmlFileNameForUrl(raw);
+                    if (fileName) {
+                        const href = `${runHtmlBase}${fileName}`;
+                        return `<a href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${escapeHtml(raw)}</a>`;
+                    }
+                }
+                return escapeHtml(raw);
+            };
+
+            const buildDetailTable = (key) => {
+                const cfg = detailConfig[key];
+                const rows = Array.isArray(audit[key]) ? audit[key] : [];
+                if (rows.length === 0) {
+                    return `<div class="audit-detail-empty">Nu exista intrari pentru acest indicator.</div>`;
+                }
+
+                const head = cfg.columns.map((col) => `<th>${escapeHtml(col.label)}</th>`).join('');
+                const body = rows.map((row) => {
+                    const tds = cfg.columns.map((col) => {
+                        const rawValue = row && Object.prototype.hasOwnProperty.call(row, col.key)
+                            ? row[col.key]
+                            : '';
+                        return `<td>${renderCellValue(rawValue, col)}</td>`;
+                    }).join('');
+                    return `<tr>${tds}</tr>`;
+                }).join('');
+
+                return `<div class="audit-table-wrap"><table class="audit-table" aria-label="Detalii ${escapeHtml(cfg.label)}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+            };
 
             const counts = audit.counts;
             auditPanelEl.style.display = 'block';
@@ -675,28 +894,56 @@
                             <tr>
                                 <td>Asset-uri lipsa</td>
                                 <td>Resurse necesare paginii (CSS, JS, imagini, fonturi) care nu au fost gasite local in export.</td>
-                                <td class="audit-count">${counts.missingAssets}</td>
+                                <td class="audit-count"><button type="button" class="audit-count-btn" data-audit-key="missingAssets">${counts.missingAssets}</button></td>
                             </tr>
                             <tr>
                                 <td>Linkuri interne rupte</td>
                                 <td>Linkuri catre pagini interne care nu exista in arhiva generata.</td>
-                                <td class="audit-count">${counts.brokenInternalLinks}</td>
+                                <td class="audit-count"><button type="button" class="audit-count-btn" data-audit-key="brokenInternalLinks">${counts.brokenInternalLinks}</button></td>
                             </tr>
                             <tr>
                                 <td>Redirectionari</td>
                                 <td>URL-uri care au raspuns cu redirect catre o alta pagina (301/302 etc.).</td>
-                                <td class="audit-count">${counts.redirects}</td>
+                                <td class="audit-count"><button type="button" class="audit-count-btn" data-audit-key="redirects">${counts.redirects}</button></td>
                             </tr>
                             <tr>
                                 <td>MIME mismatch</td>
                                 <td>Tipul de continut servit nu corespunde extensiei fisierului (ex: .css livrat ca alt tip).</td>
-                                <td class="audit-count">${counts.mimeMismatches}</td>
+                                <td class="audit-count"><button type="button" class="audit-count-btn" data-audit-key="mimeMismatches">${counts.mimeMismatches}</button></td>
                             </tr>
                         </tbody>
                     </table>
                 </div>
+                <div class="audit-detail" id="auditDetail"></div>
                 <div class="audit-legend">0 inseamna ca nu s-au detectat probleme pentru indicatorul respectiv.</div>
             `;
+
+            const detailEl = auditPanelEl.querySelector('#auditDetail');
+            const countButtons = auditPanelEl.querySelectorAll('.audit-count-btn');
+            const showDetail = (key) => {
+                const cfg = detailConfig[key];
+                if (!cfg) return;
+
+                selectedAuditCategory = key;
+
+                countButtons.forEach((btn) => {
+                    btn.classList.toggle('active', btn.dataset.auditKey === key);
+                });
+
+                detailEl.style.display = 'block';
+                detailEl.innerHTML = `<h4>${escapeHtml(cfg.label)}</h4>${buildDetailTable(key)}`;
+            };
+
+            countButtons.forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    showDetail(btn.dataset.auditKey || '');
+                });
+            });
+
+            const initialCategory = detailConfig[selectedAuditCategory]
+                ? selectedAuditCategory
+                : 'missingAssets';
+            showDetail(initialCategory);
         }
 
         async function refreshSavedRuns() {
@@ -777,6 +1024,10 @@
         }
 
         async function refreshStatus() {
+            if (shouldPauseAutoRerender()) {
+                return;
+            }
+
             const response = await fetch('/api/status');
             const status = await response.json();
 
@@ -832,7 +1083,13 @@
                     ? ` | <a href="${status.result.logWebPath}" target="_blank" rel="noreferrer">Log text</a>`
                     : '';
                 resultEl.innerHTML = `Terminat: ${status.result.totalVisited} pagini, ${status.result.totalFailed} erori.${auditSummary} <a href="${status.result.webPath}" target="_blank" rel="noreferrer">Deschide arhiva</a>${logLink}`;
-                renderAudit(status.result.audit || null);
+                const runHtmlBase = status.result.webPath
+                    ? status.result.webPath.replace(/[^/]+$/, '')
+                    : '';
+                const startUrl = status.input && status.input.targetUrl
+                    ? status.input.targetUrl
+                    : '';
+                renderAudit(status.result.audit || null, { runHtmlBase, startUrl });
             } else if (status.status === 'stopped' && status.result) {
                 setStartButtonsEnabled(true);
                 exportLinksBtn.style.display = 'none';
@@ -921,6 +1178,17 @@
         });
 
         singlePageInput.addEventListener('change', syncSinglePageBadge);
+        logsEl.addEventListener('mousedown', () => bumpSelectionHold(3000));
+        logsEl.addEventListener('mouseup', () => bumpSelectionHold(3000));
+        logsEl.addEventListener('keyup', () => bumpSelectionHold(3000));
+        auditPanelEl.addEventListener('mousedown', () => bumpSelectionHold(3000));
+        auditPanelEl.addEventListener('mouseup', () => bumpSelectionHold(3000));
+        auditPanelEl.addEventListener('keyup', () => bumpSelectionHold(3000));
+        document.addEventListener('selectionchange', () => {
+            if (hasSelectionInside(logsEl) || hasSelectionInside(auditPanelEl)) {
+                bumpSelectionHold(3000);
+            }
+        });
 
         syncSinglePageBadge();
         refreshStatus();
