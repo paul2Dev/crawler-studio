@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs/promises');
+const crypto = require('crypto');
 const express = require('express');
 const archiver = require('archiver');
 
@@ -19,6 +20,169 @@ function normalizeInteger(value, fallback) {
 
 function toBoolean(value) {
     return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function toBase64Url(value) {
+    return Buffer.from(String(value || ''), 'utf8')
+        .toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/g, '');
+}
+
+function runNameFromReferer(req) {
+    const referer = String(req.get('referer') || '').trim();
+    if (!referer) return null;
+
+    try {
+        const url = new URL(referer);
+        const match = String(url.pathname || '').match(/^\/runs\/([a-zA-Z0-9._-]+)(?:\/|$)/);
+        return match ? match[1] : null;
+    } catch {
+        return null;
+    }
+}
+
+function readCookie(req, key) {
+    const source = String(req.get('cookie') || '');
+    if (!source) return null;
+
+    const parts = source.split(';');
+    for (const part of parts) {
+        const [rawKey, ...rest] = part.trim().split('=');
+        if (rawKey !== key) continue;
+        return decodeURIComponent(rest.join('=') || '');
+    }
+    return null;
+}
+
+function runNameFromRequestContext(req) {
+    const fromReferer = runNameFromReferer(req);
+    if (fromReferer) return fromReferer;
+
+    const fromCookie = readCookie(req, 'crawler_run');
+    if (fromCookie && /^[a-zA-Z0-9._-]+$/.test(fromCookie)) {
+        return fromCookie;
+    }
+
+    return null;
+}
+
+function safeRunDir(runName) {
+    if (!/^[a-zA-Z0-9._-]+$/.test(String(runName || ''))) return null;
+    const dir = path.resolve(OUTPUT_RUNS_DIR, runName);
+    const expectedRoot = `${path.resolve(OUTPUT_RUNS_DIR)}${path.sep}`;
+    return dir.startsWith(expectedRoot) ? dir : null;
+}
+
+async function resolveNuxtFallbackAsset(runName, reqPath, search) {
+    const runDir = safeRunDir(runName);
+    if (!runDir) return null;
+
+    const cleanPath = String(reqPath || '').split('?')[0].trim();
+    const cleanSearch = String(search || '');
+
+    // Nuxt runtime metadata endpoint: /_nuxt/builds/meta/<id>.json
+    if (/^\/_nuxt\/builds\/meta\/[^/]+\.json$/i.test(cleanPath)) {
+        const metaId = path.basename(cleanPath, '.json');
+        const metaFile = path.join(runDir, 'files', `${metaId}.json`);
+        const stat = await fs.stat(metaFile).catch(() => null);
+        if (stat && stat.isFile()) return metaFile;
+    }
+
+    // Nuxt payload endpoint variants: /_payload.json?<buildId>, /about/_payload.json?<buildId>, etc.
+    if (/\/_payload\.json$/i.test(cleanPath)) {
+        const token = cleanSearch ? `?${cleanSearch.replace(/^\?/, '')}` : '';
+        const filesDir = path.join(runDir, 'files');
+
+        // Build deterministic candidate names from request path and query.
+        const baseEncoded = token ? toBase64Url(token).slice(0, 12) : '';
+        const baseName = baseEncoded ? `_payload-${baseEncoded}.json` : '_payload.json';
+
+        const summary = await fs.readFile(path.join(runDir, 'run-summary.json'), 'utf8').catch(() => '');
+        let origin = '';
+        try {
+            const parsed = JSON.parse(summary || '{}');
+            const startUrl = parsed && Array.isArray(parsed.pages) && parsed.pages[0] && parsed.pages[0].url
+                ? String(parsed.pages[0].url)
+                : '';
+            origin = startUrl ? new URL(startUrl).origin : '';
+        } catch {
+            origin = '';
+        }
+
+        if (origin && baseEncoded) {
+            const absolute = new URL(`${cleanPath}${token}`, origin).toString();
+            const tail = crypto.createHash('md5').update(absolute).digest('hex').slice(0, 7);
+            const withTail = `_payload-${baseEncoded}-${tail}.json`;
+            const withTailFile = path.join(filesDir, withTail);
+            const withTailStat = await fs.stat(withTailFile).catch(() => null);
+            if (withTailStat && withTailStat.isFile()) return withTailFile;
+        }
+
+        if (baseEncoded) {
+            const exactFile = path.join(filesDir, baseName);
+            const exactStat = await fs.stat(exactFile).catch(() => null);
+            if (exactStat && exactStat.isFile()) return exactFile;
+        }
+
+        const files = await fs.readdir(filesDir).catch(() => []);
+        if (token) {
+            const encoded = toBase64Url(token).slice(0, 12);
+            const prefix = `_payload-${encoded}`;
+            const prefixed = files.find((name) => name.startsWith(prefix) && name.endsWith('.json'));
+            if (prefixed) return path.join(runDir, 'files', prefixed);
+        }
+
+        const genericPayload = files.find((name) => /^_payload-.*\.json$/i.test(name));
+        if (genericPayload) return path.join(runDir, 'files', genericPayload);
+
+        const fallbackFile = path.join(runDir, 'files', '_payload.json');
+        const fallbackStat = await fs.stat(fallbackFile).catch(() => null);
+        if (fallbackStat && fallbackStat.isFile()) return fallbackFile;
+    }
+
+    // Absolute /_nuxt/* files that are rewritten into run-local js/css/fonts/images folders.
+    if (/^\/_nuxt\//i.test(cleanPath)) {
+        const requestedName = path.basename(cleanPath).split('?')[0];
+        const ext = path.extname(requestedName).toLowerCase();
+        const nameBase = path.parse(requestedName).name;
+        const folderByExt = {
+            '.js': 'js',
+            '.mjs': 'js',
+            '.css': 'css',
+            '.woff': 'fonts',
+            '.woff2': 'fonts',
+            '.ttf': 'fonts',
+            '.otf': 'fonts',
+            '.eot': 'fonts',
+            '.svg': 'images',
+            '.png': 'images',
+            '.jpg': 'images',
+            '.jpeg': 'images',
+            '.webp': 'images',
+            '.gif': 'images',
+            '.ico': 'images',
+            '.json': 'files',
+        };
+
+        const targetFolder = folderByExt[ext];
+        if (!targetFolder) return null;
+
+        const folderPath = path.join(runDir, targetFolder);
+        const entries = await fs.readdir(folderPath).catch(() => []);
+        const exact = entries.find((name) => name === requestedName);
+        if (exact) return path.join(folderPath, exact);
+
+        // Crawler may append a deterministic suffix (e.g. -P3Y9...) to avoid collisions.
+        const withSuffix = entries.find((name) => {
+            if (!name.endsWith(ext)) return false;
+            return name === `${nameBase}${ext}` || name.startsWith(`${nameBase}-`);
+        });
+        if (withSuffix) return path.join(folderPath, withSuffix);
+    }
+
+    return null;
 }
 
 function validateCrawlDelays(rawMin, rawMax) {
@@ -139,6 +303,58 @@ app.use('/runs', express.static(OUTPUT_RUNS_DIR, {
         }
     },
 }));
+
+app.use('/runs/:runName', (req, res, next) => {
+    const runName = String(req.params.runName || '');
+    if (!/^[a-zA-Z0-9._-]+$/.test(runName)) {
+        return next();
+    }
+
+    // Keep current run context for runtime absolute Nuxt requests that may omit Referer.
+    res.setHeader('Set-Cookie', `crawler_run=${encodeURIComponent(runName)}; Path=/; SameSite=Lax`);
+    return next();
+});
+
+app.get('/runs/:runName/js/:fileName', async (req, res, next) => {
+    try {
+        const runName = String(req.params.runName || '');
+        const fileName = String(req.params.fileName || '');
+        if (!/\.css$/i.test(fileName)) {
+            return next();
+        }
+
+        const runDir = safeRunDir(runName);
+        if (!runDir) return next();
+
+        const cssDir = path.join(runDir, 'css');
+        const entries = await fs.readdir(cssDir).catch(() => []);
+        const exact = entries.find((name) => name === fileName);
+        if (exact) return res.sendFile(path.join(cssDir, exact));
+
+        const ext = path.extname(fileName).toLowerCase();
+        const base = path.parse(fileName).name;
+        const withSuffix = entries.find((name) => name.endsWith(ext) && (name === `${base}${ext}` || name.startsWith(`${base}-`)));
+        if (withSuffix) return res.sendFile(path.join(cssDir, withSuffix));
+
+        return next();
+    } catch {
+        return next();
+    }
+});
+
+app.get([/^\/(?:.+\/)?_payload\.json$/i, '/_nuxt/*'], async (req, res, next) => {
+    try {
+        const runName = runNameFromRequestContext(req);
+        if (!runName) return next();
+
+        const filePath = await resolveNuxtFallbackAsset(runName, req.path, req.url.includes('?') ? req.url.split('?')[1] : '');
+        if (!filePath) return next();
+
+        return res.sendFile(filePath);
+    } catch {
+        return next();
+    }
+});
 
 app.get('/api/runs', async (_req, res) => {
     try {

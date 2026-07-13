@@ -731,13 +731,6 @@ class PlaywrightCrawler {
     rewriteHtml(html, currentUrl, currentHtmlPath, responseAssets, startUrl) {
         const $ = cheerio.load(html);
 
-        // Browsers frequently block module/crossorigin/integrity resources under file://
-        // (origin is null). Dropping these attrs improves direct-open compatibility.
-        $('script[type="module"]').removeAttr('type');
-        $('script[nomodule]').removeAttr('nomodule');
-        $('script[crossorigin], link[crossorigin]').removeAttr('crossorigin');
-        $('script[integrity], link[integrity]').removeAttr('integrity');
-
         const rewrite = (selector, attr) => {
             $(selector).each((_, el) => {
                 const raw = $(el).attr(attr);
@@ -827,7 +820,10 @@ class PlaywrightCrawler {
             '<script src="../files/offline-ajax-map.js"></script>',
             '<script id="copilot-offline-ajax-bootstrap">',
             '(function(){',
-            'if(location.protocol!=="file:")return;',
+            'var protocol=String(location.protocol||"").toLowerCase();',
+            'var host=String(location.hostname||"").toLowerCase();',
+            'var isLocalHttp=(protocol==="http:"||protocol==="https:")&&(host==="localhost"||host==="127.0.0.1");',
+            'if(protocol!=="file:"&&!isLocalHttp)return;',
             'var w=window;',
             'var map=w.__OFFLINE_AJAX_MAP__||{};',
             'function keyFromPath(pathValue){',
@@ -943,6 +939,37 @@ class PlaywrightCrawler {
             'return Promise.resolve(data);',
             '};',
             '}',
+            'function hasJQueryClickHandlers(el){',
+            'try{',
+            'if(!$||typeof $._data!=="function")return false;',
+            'var events=$._data(el,"events");',
+            'return !!(events&&events.click&&events.click.length);',
+            '}catch(e){return false;}',
+            '}',
+            'function renderLoadMoreFallback(anchor,payload){',
+            'if(!payload||typeof payload!=="object")return;',
+            'if(typeof payload.html==="string"&&payload.html){',
+            'var container=document.querySelector(".gallery-page .gallery-items.grid")||document.querySelector(".gallery-list-widget.grid")||document.querySelector(".grid");',
+            'if(container)container.insertAdjacentHTML("beforeend",payload.html);',
+            '}',
+            'var nextUrl=(typeof payload.load_more_url==="string")?payload.load_more_url:"";',
+            'anchor.setAttribute("href",nextUrl);',
+            'if(!nextUrl){anchor.classList.add("hide-load-more");}else{anchor.classList.remove("hide-load-more");}',
+            'anchor.classList.remove("disabled");',
+            '}',
+            'document.addEventListener("click",function(evt){',
+            'var target=evt.target;',
+            'if(!target||typeof target.closest!=="function")return;',
+            'var anchor=target.closest("a#load-more-gallery-items,a#load-more-galleries");',
+            'if(!anchor)return;',
+            'var href=anchor.getAttribute("href")||anchor.href||"";',
+            'var payload=payloadFor(href);',
+            'if(payload===null)return;',
+            'evt.preventDefault();',
+            'if(hasJQueryClickHandlers(anchor))return;',
+            'anchor.classList.add("disabled");',
+            'renderLoadMoreFallback(anchor,clonePayload(payload));',
+            '},true);',
             '})();',
             '</script>',
         ].join('');

@@ -79,7 +79,8 @@
         }
 
         input[type="url"],
-        input[type="number"] {
+        input[type="number"],
+        select {
             border: 1px solid var(--line);
             border-radius: 10px;
             padding: 10px 12px;
@@ -306,8 +307,6 @@
             padding: 0;
             display: grid;
             gap: 6px;
-            max-height: 180px;
-            overflow: auto;
         }
 
         .saved li {
@@ -465,6 +464,15 @@
                 <div class="checks">
                     <label><input id="respectRobots" type="checkbox" checked />Respecta robots.txt</label>
                     <label><input id="saveExternalAssets" type="checkbox" />Include asset-uri externe</label>
+                    <label><input id="notifySound" type="checkbox" checked />Sunet la final job</label>
+                    <label>
+                        Volum notificare
+                        <select id="notifyVolume">
+                            <option value="low">Low</option>
+                            <option value="medium" selected>Medium</option>
+                            <option value="high">High</option>
+                        </select>
+                    </label>
                     <label><input id="singlePage" type="checkbox" />Doar pagina curenta (fara crawl linkuri)<span
                             id="singlePageBadge" class="mode-badge">INACTIVE</span></label>
                 </div>
@@ -514,13 +522,19 @@
         const savedRunsEl = document.getElementById('savedRuns');
         const delayMinInput = document.getElementById('delayMinMs');
         const delayMaxInput = document.getElementById('delayMaxMs');
+        const notifySoundInput = document.getElementById('notifySound');
+        const notifyVolumeInput = document.getElementById('notifyVolume');
         const singlePageInput = document.getElementById('singlePage');
         const singlePageBadge = document.getElementById('singlePageBadge');
+        const SOUND_PREF_KEY = 'crawlerStudio.notifySound';
+        const SOUND_VOLUME_PREF_KEY = 'crawlerStudio.notifyVolume';
         let latestRecommendations = null;
         let latestDryRunLinks = [];
         let latestDryRunStartUrl = '';
         let selectedAuditCategory = 'missingAssets';
         let selectionHoldUntil = 0;
+        let lastJobSnapshot = null;
+        let audioContext = null;
 
         function nowMs() {
             return Date.now();
@@ -580,6 +594,126 @@
                 saveExternalAssets: document.getElementById('saveExternalAssets').checked,
                 singlePage: singlePageInput.checked,
             };
+        }
+
+        function loadSoundPreference() {
+            const saved = localStorage.getItem(SOUND_PREF_KEY);
+            if (saved === null) {
+                notifySoundInput.checked = true;
+            } else {
+                notifySoundInput.checked = saved === '1';
+            }
+
+            const savedVolume = localStorage.getItem(SOUND_VOLUME_PREF_KEY);
+            notifyVolumeInput.value = ['low', 'medium', 'high'].includes(savedVolume)
+                ? savedVolume
+                : 'medium';
+        }
+
+        function saveSoundPreference() {
+            localStorage.setItem(SOUND_PREF_KEY, notifySoundInput.checked ? '1' : '0');
+            localStorage.setItem(SOUND_VOLUME_PREF_KEY, notifyVolumeInput.value);
+        }
+
+        function volumeScale() {
+            if (notifyVolumeInput.value === 'low') return 0.75;
+            if (notifyVolumeInput.value === 'high') return 2.8;
+            return 1.0;
+        }
+
+        function getAudioContext() {
+            if (audioContext) {
+                return audioContext;
+            }
+
+            const Ctx = window.AudioContext || window.webkitAudioContext;
+            if (!Ctx) {
+                return null;
+            }
+
+            audioContext = new Ctx();
+            return audioContext;
+        }
+
+        function primeAudioContext() {
+            const ctx = getAudioContext();
+            if (!ctx) return;
+            if (ctx.state === 'suspended') {
+                ctx.resume().catch(() => { });
+            }
+        }
+
+        function scheduleTone(ctx, frequency, startTime, durationSec, gainValue, waveType = 'square') {
+            const mainOsc = ctx.createOscillator();
+            const mainGain = ctx.createGain();
+            const overtoneOsc = ctx.createOscillator();
+            const overtoneGain = ctx.createGain();
+
+            const safeGain = Math.min(0.28, Math.max(0.01, gainValue));
+
+            mainOsc.type = waveType;
+            mainOsc.frequency.setValueAtTime(frequency, startTime);
+            mainGain.gain.setValueAtTime(0.0001, startTime);
+            mainGain.gain.exponentialRampToValueAtTime(safeGain, startTime + 0.01);
+            mainGain.gain.exponentialRampToValueAtTime(0.0001, startTime + durationSec);
+
+            overtoneOsc.type = 'triangle';
+            overtoneOsc.frequency.setValueAtTime(frequency * 2, startTime);
+            overtoneGain.gain.setValueAtTime(0.0001, startTime);
+            overtoneGain.gain.exponentialRampToValueAtTime(safeGain * 0.35, startTime + 0.01);
+            overtoneGain.gain.exponentialRampToValueAtTime(0.0001, startTime + durationSec);
+
+            mainOsc.connect(mainGain);
+            overtoneOsc.connect(overtoneGain);
+            mainGain.connect(ctx.destination);
+            overtoneGain.connect(ctx.destination);
+
+            mainOsc.start(startTime);
+            overtoneOsc.start(startTime);
+            mainOsc.stop(startTime + durationSec + 0.02);
+            overtoneOsc.stop(startTime + durationSec + 0.02);
+        }
+
+        function playJobFinishedSound(job) {
+            if (!notifySoundInput.checked) return;
+
+            const ctx = getAudioContext();
+            if (!ctx) return;
+            if (ctx.state === 'suspended') {
+                ctx.resume().catch(() => { });
+            }
+
+            const status = String(job?.status || '');
+            const mode = String(job?.mode || 'crawl');
+            const t0 = ctx.currentTime + 0.03;
+            const scale = volumeScale();
+            const repeatOffset = 0.55;
+
+            if (status === 'completed') {
+                if (mode === 'dry-run') {
+                    scheduleTone(ctx, 880, t0, 0.11, 0.07 * scale, 'square');
+                    scheduleTone(ctx, 1174.66, t0 + 0.13, 0.12, 0.085 * scale, 'square');
+                    scheduleTone(ctx, 1318.51, t0 + 0.28, 0.16, 0.095 * scale, 'square');
+                    scheduleTone(ctx, 880, t0 + repeatOffset, 0.11, 0.07 * scale, 'square');
+                    scheduleTone(ctx, 1174.66, t0 + repeatOffset + 0.13, 0.12, 0.085 * scale, 'square');
+                    scheduleTone(ctx, 1318.51, t0 + repeatOffset + 0.28, 0.16, 0.095 * scale, 'square');
+                } else {
+                    scheduleTone(ctx, 659.25, t0, 0.1, 0.075 * scale, 'square');
+                    scheduleTone(ctx, 987.77, t0 + 0.12, 0.11, 0.09 * scale, 'square');
+                    scheduleTone(ctx, 1318.51, t0 + 0.25, 0.19, 0.105 * scale, 'square');
+                    scheduleTone(ctx, 659.25, t0 + repeatOffset, 0.1, 0.075 * scale, 'square');
+                    scheduleTone(ctx, 987.77, t0 + repeatOffset + 0.12, 0.11, 0.09 * scale, 'square');
+                    scheduleTone(ctx, 1318.51, t0 + repeatOffset + 0.25, 0.19, 0.105 * scale, 'square');
+                }
+                return;
+            }
+
+            if (status === 'failed' || status === 'stopped') {
+                scheduleTone(ctx, 392, t0, 0.14, 0.085 * scale, 'sawtooth');
+                scheduleTone(ctx, 293.66, t0 + 0.16, 0.18, 0.1 * scale, 'sawtooth');
+                scheduleTone(ctx, 392, t0 + repeatOffset, 0.14, 0.085 * scale, 'sawtooth');
+                scheduleTone(ctx, 293.66, t0 + repeatOffset + 0.16, 0.18, 0.1 * scale, 'sawtooth');
+            }
         }
 
         function syncSinglePageBadge() {
@@ -1031,6 +1165,24 @@
             const response = await fetch('/api/status');
             const status = await response.json();
 
+            const currentSnapshot = {
+                id: status.id || null,
+                mode: status.mode || null,
+                status: status.status || null,
+            };
+
+            const wasRunning = lastJobSnapshot
+                && lastJobSnapshot.id
+                && lastJobSnapshot.id === currentSnapshot.id
+                && (lastJobSnapshot.status === 'running' || lastJobSnapshot.status === 'stopping');
+            const isNowFinal = currentSnapshot.id
+                && ['completed', 'failed', 'stopped'].includes(currentSnapshot.status);
+
+            if (wasRunning && isNowFinal) {
+                playJobFinishedSound(currentSnapshot);
+            }
+            lastJobSnapshot = currentSnapshot;
+
             if (!status.id) {
                 statusEl.textContent = 'Niciun job activ.';
                 stopBtn.style.display = 'none';
@@ -1107,6 +1259,7 @@
             event.preventDefault();
             const payload = payloadFromForm();
             resultEl.textContent = '';
+            primeAudioContext();
 
             const delayError = validateCrawlDelays(payload.delayMinMs, payload.delayMaxMs);
             if (delayError) {
@@ -1120,6 +1273,7 @@
 
         dryRunBtn.addEventListener('click', async () => {
             const base = payloadFromForm();
+            primeAudioContext();
             latestRecommendations = null;
             latestDryRunLinks = [];
             latestDryRunStartUrl = '';
@@ -1165,6 +1319,8 @@
 
         copyLogBtn.addEventListener('click', copyLogsToClipboard);
         exportLinksBtn.addEventListener('click', exportDiscoveredLinks);
+        notifySoundInput.addEventListener('change', saveSoundPreference);
+        notifyVolumeInput.addEventListener('change', saveSoundPreference);
 
         stopBtn.addEventListener('click', async () => {
             const response = await fetch('/api/stop', { method: 'POST' });
@@ -1191,6 +1347,7 @@
         });
 
         syncSinglePageBadge();
+        loadSoundPreference();
         refreshStatus();
         refreshSavedRuns();
         setInterval(refreshStatus, 2000);
