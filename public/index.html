@@ -80,6 +80,8 @@
 
         input[type="url"],
         input[type="number"],
+        input[type="text"],
+        input[type="password"],
         select {
             border: 1px solid var(--line);
             border-radius: 10px;
@@ -87,6 +89,17 @@
             font-size: 0.96rem;
             background: #fff;
             color: var(--ink);
+        }
+
+        .auth-box {
+            border: 1px dashed #c9c0b2;
+            border-radius: 12px;
+            padding: 10px;
+            background: #fcf8f1;
+        }
+
+        .auth-grid {
+            margin-top: 8px;
         }
 
         .checks {
@@ -477,6 +490,29 @@
                             id="singlePageBadge" class="mode-badge">INACTIVE</span></label>
                 </div>
 
+                    <div class="auth-box">
+                        <label><input id="authEnabled" type="checkbox" />Login inainte de crawl (zona user)</label>
+                        <div id="authFields" class="grid auth-grid" style="display:none;">
+                        <label>URL login<input id="authLoginUrl" type="url" placeholder="https://site.com/login" /></label>
+                        <label>Selector deschidere modal (optional)<input id="authOpenModalSelector" type="text"
+                            placeholder="button[data-login], .open-login" /></label>
+                        <label>Selector confirmare GDPR (optional)<input id="authConfirmSelector" type="text"
+                            placeholder="#confirmPrivacyBtn" /></label>
+                        <label>Utilizator<input id="authUsername" type="text" placeholder="username / email" /></label>
+                        <label>Parola<input id="authPassword" type="password" placeholder="parola cont" /></label>
+                        <label>Selector user<input id="authUsernameSelector" type="text"
+                            placeholder="input[name='username']" /></label>
+                        <label>Selector parola<input id="authPasswordSelector" type="text"
+                            placeholder="input[name='password']" /></label>
+                        <label>Selector submit<input id="authSubmitSelector" type="text"
+                            placeholder="button[type='submit']" /></label>
+                        <label>URL trebuie sa contina (optional)<input id="authSuccessUrlContains" type="text"
+                            placeholder="/dashboard" /></label>
+                        <label>Wait dupa login (ms)<input id="authWaitAfterLoginMs" type="number" min="0" max="15000"
+                            value="1200" /></label>
+                        </div>
+                    </div>
+
                 <div class="actions">
                     <button id="crawlBtn" type="submit">Start Crawl</button>
                     <button id="dryRunBtn" type="button" class="ghost">Dry Run Statistici</button>
@@ -526,6 +562,8 @@
         const notifyVolumeInput = document.getElementById('notifyVolume');
         const singlePageInput = document.getElementById('singlePage');
         const singlePageBadge = document.getElementById('singlePageBadge');
+        const authEnabledInput = document.getElementById('authEnabled');
+        const authFields = document.getElementById('authFields');
         const SOUND_PREF_KEY = 'crawlerStudio.notifySound';
         const SOUND_VOLUME_PREF_KEY = 'crawlerStudio.notifyVolume';
         let latestRecommendations = null;
@@ -593,7 +631,22 @@
                 respectRobots: document.getElementById('respectRobots').checked,
                 saveExternalAssets: document.getElementById('saveExternalAssets').checked,
                 singlePage: singlePageInput.checked,
+                authEnabled: authEnabledInput.checked,
+                authLoginUrl: document.getElementById('authLoginUrl').value.trim(),
+                authOpenModalSelector: document.getElementById('authOpenModalSelector').value.trim(),
+                authConfirmSelector: document.getElementById('authConfirmSelector').value.trim(),
+                authUsername: document.getElementById('authUsername').value.trim(),
+                authPassword: document.getElementById('authPassword').value,
+                authUsernameSelector: document.getElementById('authUsernameSelector').value.trim(),
+                authPasswordSelector: document.getElementById('authPasswordSelector').value.trim(),
+                authSubmitSelector: document.getElementById('authSubmitSelector').value.trim(),
+                authSuccessUrlContains: document.getElementById('authSuccessUrlContains').value.trim(),
+                authWaitAfterLoginMs: Number(document.getElementById('authWaitAfterLoginMs').value),
             };
+        }
+
+        function syncAuthFields() {
+            authFields.style.display = authEnabledInput.checked ? 'grid' : 'none';
         }
 
         function loadSoundPreference() {
@@ -1273,6 +1326,8 @@
 
         dryRunBtn.addEventListener('click', async () => {
             const base = payloadFromForm();
+            const dryRunProbePages = Math.max(180, Number(base.maxPages) || 180);
+            const dryRunProbeDepth = Math.max(6, Number(base.maxDepth) || 6);
             primeAudioContext();
             latestRecommendations = null;
             latestDryRunLinks = [];
@@ -1293,8 +1348,19 @@
                     crawlDelayMaxMs: base.delayMaxMs,
                     respectRobots: base.respectRobots,
                     saveExternalAssets: false,
-                    maxPagesProbe: 180,
-                    maxDepthProbe: 6,
+                    maxPagesProbe: dryRunProbePages,
+                    maxDepthProbe: dryRunProbeDepth,
+                    authEnabled: base.authEnabled,
+                    authLoginUrl: base.authLoginUrl,
+                    authOpenModalSelector: base.authOpenModalSelector,
+                    authConfirmSelector: base.authConfirmSelector,
+                    authUsername: base.authUsername,
+                    authPassword: base.authPassword,
+                    authUsernameSelector: base.authUsernameSelector,
+                    authPasswordSelector: base.authPasswordSelector,
+                    authSubmitSelector: base.authSubmitSelector,
+                    authSuccessUrlContains: base.authSuccessUrlContains,
+                    authWaitAfterLoginMs: base.authWaitAfterLoginMs,
                 }),
             });
 
@@ -1334,6 +1400,7 @@
         });
 
         singlePageInput.addEventListener('change', syncSinglePageBadge);
+        authEnabledInput.addEventListener('change', syncAuthFields);
         logsEl.addEventListener('mousedown', () => bumpSelectionHold(3000));
         logsEl.addEventListener('mouseup', () => bumpSelectionHold(3000));
         logsEl.addEventListener('keyup', () => bumpSelectionHold(3000));
@@ -1347,6 +1414,7 @@
         });
 
         syncSinglePageBadge();
+        syncAuthFields();
         loadSoundPreference();
         refreshStatus();
         refreshSavedRuns();

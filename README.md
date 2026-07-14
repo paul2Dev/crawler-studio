@@ -10,6 +10,7 @@ Proiectul are UI simplu pentru rulare, monitorizare job-uri, dry run, oprire job
 - Export local in `output-runs/` (HTML + CSS/JS/images/fonts/files/video/audio).
 - Rescriere linkuri pentru navigare locala intre paginile exportate.
 - Mod `Single Page` (doar URL-ul introdus, fara urmarire linkuri).
+- Login optional inainte de crawl (user/parola + selectori CSS pentru formular login).
 - Dry run pentru estimare pagini si depth (fara crawl complet).
 - Respect `robots.txt` (configurabil din UI).
 - Delay control cu validari stricte in frontend + backend.
@@ -51,9 +52,10 @@ $env:PORT=3011; npm start
 1. Introdu URL-ul tinta.
 2. Configureaza `Max pagini`, `Max depth`, delay-uri.
 3. Optional: bifeaza `Doar pagina curenta` pentru export single-page.
-4. Apasa `Start Crawl`.
-5. Monitorizeaza progresul in log.
-6. Deschide arhiva din `Arhive salvate`.
+4. Optional: bifeaza `Login inainte de crawl` si completeaza datele de autentificare.
+5. Apasa `Start Crawl`.
+6. Monitorizeaza progresul in log.
+7. Deschide arhiva din `Arhive salvate`.
 
 ## Delay rules
 
@@ -89,6 +91,21 @@ Daca valorile nu respecta regulile, jobul NU porneste.
 - `POST /api/stop` - oprire job activ
 - `GET /api/runs` - lista arhive
 - `DELETE /api/runs/:runName` - stergere arhiva
+
+### `POST /api/crawl` - campuri de autentificare optionale
+
+- `authEnabled`: `true/false`
+- `authLoginUrl`: URL pagina login (default: `targetUrl`)
+- Daca login-ul este in modal pe pagina principala, `authLoginUrl` poate ramane gol (se foloseste automat `targetUrl`)
+- `authOpenModalSelector`: selector CSS optional pentru buton/link care deschide modalul de login
+- `authConfirmSelector`: selector CSS optional pentru un al doilea click (ex: GDPR "Sunt de acord")
+- `authUsername`: user/email
+- `authPassword`: parola
+- `authUsernameSelector`: selector CSS pentru campul user
+- `authPasswordSelector`: selector CSS pentru campul parola
+- `authSubmitSelector`: selector CSS pentru buton submit
+- `authSuccessUrlContains`: verificare optionala dupa login (substring in URL)
+- `authWaitAfterLoginMs`: asteptare dupa click login (default 1200)
 
 ## Structura proiect
 

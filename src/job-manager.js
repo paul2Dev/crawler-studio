@@ -17,6 +17,19 @@ async function writeRunLogFile(outputDir, logs) {
     await fs.writeFile(path.join(outputDir, 'run-log.txt'), content, 'utf8');
 }
 
+function redactCrawlInput(input) {
+    if (!input || typeof input !== 'object') return input;
+    if (!input.auth || typeof input.auth !== 'object') return input;
+
+    return {
+        ...input,
+        auth: {
+            ...input.auth,
+            password: input.auth.password ? '***' : '',
+        },
+    };
+}
+
 class JobManager {
     constructor(baseOutputDir) {
         this.baseOutputDir = baseOutputDir;
@@ -31,7 +44,17 @@ class JobManager {
         }
 
         const { id, mode, status, startedAt, finishedAt, logs, result, input } = this.currentJob;
-        return { id, mode, running: status === 'running', status, startedAt, finishedAt, logs, result, input };
+        return {
+            id,
+            mode,
+            running: status === 'running',
+            status,
+            startedAt,
+            finishedAt,
+            logs,
+            result,
+            input: redactCrawlInput(input),
+        };
     }
 
     async startCrawl(input) {

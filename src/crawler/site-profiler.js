@@ -36,6 +36,7 @@ class SiteProfiler {
             saveExternalAssets: false,
             crawlDelayMinMs: 700,
             crawlDelayMaxMs: 1500,
+            auth: { enabled: false },
             ...options,
         };
         this.onProgress = onProgress;
@@ -84,6 +85,8 @@ class SiteProfiler {
             viewport: { width: rand(1280, 1580), height: rand(760, 980) },
             locale: 'ro-RO',
         });
+
+        await this.authenticateIfNeeded(startUrl);
 
         const queue = [{ url: startUrl, depth: 0 }];
         const visited = new Set();
@@ -184,6 +187,75 @@ class SiteProfiler {
         };
     }
 
+    async authenticateIfNeeded(startUrl) {
+        const auth = this.options.auth;
+        if (!auth || auth.enabled !== true) {
+            return;
+        }
+
+        const loginUrl = normalizeUrl(auth.loginUrl || startUrl);
+        const openModalSelector = String(auth.openModalSelector || '').trim();
+        const confirmSelector = String(auth.confirmSelector || '').trim();
+        const usernameSelector = String(auth.usernameSelector || '').trim();
+        const passwordSelector = String(auth.passwordSelector || '').trim();
+        const submitSelector = String(auth.submitSelector || '').trim();
+        const successUrlContains = String(auth.successUrlContains || '').trim();
+        const waitAfterLoginMs = Math.max(0, Number(auth.waitAfterLoginMs) || 1200);
+
+        this.onProgress({
+            level: 'info',
+            message: `Dry run: pornesc autentificarea in sesiune: ${loginUrl}`,
+        });
+
+        const loginPage = await this.context.newPage();
+
+        try {
+            await loginPage.goto(loginUrl, {
+                waitUntil: 'domcontentloaded',
+                timeout: this.options.pageTimeoutMs,
+            });
+
+            if (openModalSelector) {
+                await loginPage.waitForSelector(openModalSelector, { timeout: this.options.pageTimeoutMs });
+                await loginPage.click(openModalSelector);
+            }
+
+            if (confirmSelector) {
+                await loginPage.waitForSelector(confirmSelector, { timeout: this.options.pageTimeoutMs });
+                await loginPage.click(confirmSelector);
+            }
+
+            await loginPage.waitForSelector(usernameSelector, { timeout: this.options.pageTimeoutMs });
+            await loginPage.fill(usernameSelector, String(auth.username || ''));
+
+            await loginPage.waitForSelector(passwordSelector, { timeout: this.options.pageTimeoutMs });
+            await loginPage.fill(passwordSelector, String(auth.password || ''));
+
+            await loginPage.waitForSelector(submitSelector, { timeout: this.options.pageTimeoutMs });
+            await loginPage.click(submitSelector);
+
+            await loginPage.waitForLoadState('domcontentloaded', { timeout: 9000 }).catch(() => { });
+            if (waitAfterLoginMs > 0) {
+                await loginPage.waitForTimeout(waitAfterLoginMs);
+            }
+
+            if (successUrlContains && !String(loginPage.url() || '').includes(successUrlContains)) {
+                throw new Error(`Login aparent finalizat, dar URL-ul nu contine "${successUrlContains}".`);
+            }
+
+            this.onProgress({
+                level: 'info',
+                message: 'Dry run: autentificare realizata, continui analiza in sesiune autentificata.',
+            });
+        } catch (error) {
+            const wrapped = new Error(`Dry run: autentificare esuata: ${error.message}`);
+            wrapped.code = 'AUTH_FAILED';
+            throw wrapped;
+        } finally {
+            await loginPage.close().catch(() => { });
+        }
+    }
+
     async collectLinksFromPage(page, currentUrl, startUrl) {
         const hrefs = await page.$$eval('a[href]', (nodes) =>
             nodes
@@ -242,6 +314,7 @@ function buildProfilerOptions(input) {
         crawlDelayMaxMs: input.crawlDelayMaxMs,
         respectRobots: input.respectRobots,
         saveExternalAssets: input.saveExternalAssets,
+        auth: input.auth,
         userAgent: DEFAULT_UA[rand(0, DEFAULT_UA.length - 1)],
     };
 }

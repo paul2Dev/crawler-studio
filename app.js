@@ -18,6 +18,10 @@ function normalizeInteger(value, fallback) {
     return Number.isFinite(n) ? Math.trunc(n) : fallback;
 }
 
+function normalizeText(value) {
+    return String(value || '').trim();
+}
+
 function toBoolean(value) {
     return value === true || value === 'true' || value === 1 || value === '1';
 }
@@ -203,6 +207,73 @@ function validateCrawlDelays(rawMin, rawMax) {
     }
 
     return { valid: true, minDelay, maxDelay };
+}
+
+function parseAuthConfig(body) {
+    const authBody = body && typeof body.auth === 'object' && body.auth !== null ? body.auth : {};
+    const enabled = toBoolean(body?.authEnabled) || toBoolean(authBody.enabled);
+    if (!enabled) return { enabled: false };
+
+    const username = normalizeText(body?.authUsername ?? authBody.username);
+    const password = String(body?.authPassword ?? authBody.password ?? '');
+    const loginUrlInput = normalizeText(body?.authLoginUrl ?? authBody.loginUrl);
+    const loginUrlRaw = loginUrlInput || normalizeText(body?.targetUrl);
+    const openModalSelector = normalizeText(body?.authOpenModalSelector ?? authBody.openModalSelector);
+    const confirmSelector = normalizeText(body?.authConfirmSelector ?? authBody.confirmSelector);
+    const usernameSelector = normalizeText(body?.authUsernameSelector ?? authBody.usernameSelector)
+        || 'input[name="username"], input[type="email"], #username';
+    const passwordSelector = normalizeText(body?.authPasswordSelector ?? authBody.passwordSelector)
+        || 'input[name="password"], input[type="password"], #password';
+    const submitSelector = normalizeText(body?.authSubmitSelector ?? authBody.submitSelector)
+        || 'button[type="submit"], input[type="submit"]';
+    const successUrlContains = normalizeText(body?.authSuccessUrlContains ?? authBody.successUrlContains);
+    const waitAfterLoginMs = Math.max(0, Math.min(15000, normalizeInteger(body?.authWaitAfterLoginMs ?? authBody.waitAfterLoginMs, 1200)));
+
+    if (!username) {
+        return { error: 'Pentru login, campul utilizator este obligatoriu.' };
+    }
+    if (!password) {
+        return { error: 'Pentru login, campul parola este obligatoriu.' };
+    }
+    if (!loginUrlRaw) {
+        return { error: 'Pentru login, URL-ul paginii de autentificare este obligatoriu.' };
+    }
+
+    let loginUrl;
+    try {
+        const parsed = new URL(loginUrlRaw);
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+            return { error: 'URL-ul de login trebuie sa fie http/https.' };
+        }
+        loginUrl = parsed.toString();
+    } catch (error) {
+        return { error: `URL login invalid: ${error.message}` };
+    }
+
+    return {
+        enabled: true,
+        username,
+        password,
+        loginUrl,
+        openModalSelector,
+        confirmSelector,
+        usernameSelector,
+        passwordSelector,
+        submitSelector,
+        successUrlContains,
+        waitAfterLoginMs,
+    };
+}
+
+function redactCrawlInput(input) {
+    if (!input || typeof input !== 'object') return input;
+    if (!input.auth || typeof input.auth !== 'object') return input;
+
+    const redactedAuth = {
+        ...input.auth,
+        password: input.auth.password ? '***' : '',
+    };
+    return { ...input, auth: redactedAuth };
 }
 
 async function fileExists(filePath) {
@@ -478,6 +549,11 @@ app.post('/api/crawl', async (req, res) => {
         }
 
         const singlePageMode = toBoolean(body.singlePage);
+        const auth = parseAuthConfig(body);
+        if (auth.error) {
+            return res.status(400).json({ error: auth.error });
+        }
+
         const input = {
             targetUrl: parsed.toString(),
             maxPages: singlePageMode ? 1 : Math.max(1, normalizeInteger(body.maxPages, 150)),
@@ -487,13 +563,14 @@ app.post('/api/crawl', async (req, res) => {
             respectRobots: body.respectRobots !== false,
             saveExternalAssets: body.saveExternalAssets === true,
             singlePage: singlePageMode,
+            auth,
         };
 
         manager.startCrawl(input).catch(() => {
             // Status endpoint returns detailed error.
         });
 
-        return res.status(202).json({ accepted: true, input });
+        return res.status(202).json({ accepted: true, input: redactCrawlInput(input) });
     } catch (error) {
         return res.status(400).json({ error: `URL invalid: ${error.message}` });
     }
@@ -513,6 +590,11 @@ app.post('/api/dry-run', async (req, res) => {
             return res.status(400).json({ error: 'Doar URL-uri http/https sunt permise.' });
         }
 
+        const auth = parseAuthConfig(body);
+        if (auth.error) {
+            return res.status(400).json({ error: auth.error });
+        }
+
         const input = {
             targetUrl: parsed.toString(),
             maxPagesProbe: Math.max(30, normalizeInteger(body.maxPagesProbe, 180)),
@@ -525,13 +607,14 @@ app.post('/api/dry-run', async (req, res) => {
             crawlDelayMaxMs: Math.max(1500, normalizeInteger(body.crawlDelayMaxMs, 1500)),
             respectRobots: body.respectRobots !== false,
             saveExternalAssets: false,
+            auth,
         };
 
         manager.startDryRun(input).catch(() => {
             // Status endpoint returns detailed error.
         });
 
-        return res.status(202).json({ accepted: true, input });
+        return res.status(202).json({ accepted: true, input: redactCrawlInput(input) });
     } catch (error) {
         return res.status(400).json({ error: `URL invalid: ${error.message}` });
     }

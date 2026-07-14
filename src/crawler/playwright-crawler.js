@@ -116,6 +116,7 @@ class PlaywrightCrawler {
             domAssetDirectLimit: 180,
             domAssetDirectConcurrency: 6,
             directAssetTimeoutMs: 6000,
+            auth: { enabled: false },
             ...options,
         };
         this.onProgress = onProgress;
@@ -167,6 +168,21 @@ class PlaywrightCrawler {
         }
     }
 
+    enqueueDiscoveredLinks(queue, links, depth) {
+        if (!Array.isArray(links) || links.length === 0) return;
+        const normalizedDepth = Math.max(0, Number(depth) || 0);
+        const queuedUrls = new Set(queue.map((item) => normalizeUrl(item.url)));
+
+        for (const link of links) {
+            if (!link) continue;
+            const url = normalizeUrl(link);
+            if (this.visited.has(url)) continue;
+            if (queuedUrls.has(url)) continue;
+            queue.push({ url, depth: normalizedDepth });
+            queuedUrls.add(url);
+        }
+    }
+
     async run() {
         const startUrl = normalizeUrl(this.options.startUrl);
         const origin = new URL(startUrl).origin;
@@ -191,6 +207,8 @@ class PlaywrightCrawler {
             locale: 'ro-RO',
         });
 
+        await this.authenticateIfNeeded(startUrl);
+
         const queue = [{ url: startUrl, depth: 0 }];
         let ajaxExpansionDone = this.options.singlePage;
 
@@ -198,11 +216,7 @@ class PlaywrightCrawler {
             while ((queue.length || !ajaxExpansionDone) && this.visited.size < this.options.maxPages) {
                 if (!queue.length && !ajaxExpansionDone) {
                     const discoveredFromAjax = await this.processAjaxPayloadAssets(startUrl);
-                    for (const link of discoveredFromAjax) {
-                        if (!this.visited.has(link)) {
-                            queue.push({ url: link, depth: 1 });
-                        }
-                    }
+                    this.enqueueDiscoveredLinks(queue, discoveredFromAjax, 1);
                     ajaxExpansionDone = true;
                     if (!queue.length) {
                         break;
@@ -316,11 +330,12 @@ class PlaywrightCrawler {
 
                     if (!this.options.singlePage) {
                         const links = this.extractLinks(html, currentUrl, startUrl);
-                        for (const link of links) {
-                            if (!this.visited.has(link)) {
-                                queue.push({ url: link, depth: current.depth + 1 });
-                            }
-                        }
+                        this.enqueueDiscoveredLinks(queue, links, current.depth + 1);
+
+                        // Expand and enqueue links discovered inside AJAX payloads while the crawl
+                        // is still active, so pages revealed by "load more" are captured as HTML.
+                        const discoveredFromAjax = await this.processAjaxPayloadAssets(startUrl);
+                        this.enqueueDiscoveredLinks(queue, discoveredFromAjax, current.depth + 1);
                     }
                 } catch (error) {
                     this.failed.push({ url: currentUrl, error: error.message });
@@ -362,6 +377,7 @@ class PlaywrightCrawler {
             ? path.relative(htmlFolder, startPagePath).split(path.sep).join('/')
             : null;
         const archiveIndexFile = await this.writeIndex(startUrl);
+        await this.applyOfflineCompatibilityPatches();
         const audit = await this.buildAuditReport(startUrl);
 
         return {
@@ -373,6 +389,76 @@ class PlaywrightCrawler {
             archiveIndexFile,
             audit,
         };
+    }
+
+    async authenticateIfNeeded(startUrl) {
+        const auth = this.options.auth;
+        if (!auth || auth.enabled !== true) {
+            return;
+        }
+
+        const loginUrl = normalizeUrl(auth.loginUrl || startUrl);
+        const openModalSelector = String(auth.openModalSelector || '').trim();
+        const confirmSelector = String(auth.confirmSelector || '').trim();
+        const usernameSelector = String(auth.usernameSelector || '').trim();
+        const passwordSelector = String(auth.passwordSelector || '').trim();
+        const submitSelector = String(auth.submitSelector || '').trim();
+        const successUrlContains = String(auth.successUrlContains || '').trim();
+        const waitAfterLoginMs = Math.max(0, Number(auth.waitAfterLoginMs) || 1200);
+
+        this.onProgress({
+            level: 'info',
+            message: `Pornesc autentificarea in sesiune: ${loginUrl}`,
+        });
+
+        const loginPage = await this.context.newPage();
+
+        try {
+            await loginPage.goto(loginUrl, {
+                waitUntil: 'domcontentloaded',
+                timeout: this.options.pageTimeoutMs,
+            });
+
+            if (openModalSelector) {
+                await loginPage.waitForSelector(openModalSelector, { timeout: this.options.pageTimeoutMs });
+                await loginPage.click(openModalSelector);
+            }
+
+            if (confirmSelector) {
+                await loginPage.waitForSelector(confirmSelector, { timeout: this.options.pageTimeoutMs });
+                await loginPage.click(confirmSelector);
+            }
+
+            await loginPage.waitForSelector(usernameSelector, { timeout: this.options.pageTimeoutMs });
+            await loginPage.fill(usernameSelector, String(auth.username || ''));
+
+            await loginPage.waitForSelector(passwordSelector, { timeout: this.options.pageTimeoutMs });
+            await loginPage.fill(passwordSelector, String(auth.password || ''));
+
+            await loginPage.waitForSelector(submitSelector, { timeout: this.options.pageTimeoutMs });
+            await loginPage.click(submitSelector);
+
+            // Some login forms redirect immediately, while others authenticate via XHR.
+            await loginPage.waitForLoadState('domcontentloaded', { timeout: 9000 }).catch(() => { });
+            if (waitAfterLoginMs > 0) {
+                await loginPage.waitForTimeout(waitAfterLoginMs);
+            }
+
+            if (successUrlContains && !String(loginPage.url() || '').includes(successUrlContains)) {
+                throw new Error(`Login aparent finalizat, dar URL-ul nu contine "${successUrlContains}".`);
+            }
+
+            this.onProgress({
+                level: 'info',
+                message: 'Autentificare realizata. Pornesc crawl-ul in sesiune autentificata.',
+            });
+        } catch (error) {
+            const wrapped = new Error(`Autentificare esuata: ${error.message}`);
+            wrapped.code = 'AUTH_FAILED';
+            throw wrapped;
+        } finally {
+            await loginPage.close().catch(() => { });
+        }
     }
 
     async prepareDirs(out) {
@@ -782,9 +868,33 @@ class PlaywrightCrawler {
         rewrite('video[src]', 'src');
         rewrite('audio[src]', 'src');
 
+        // file:// pages have origin "null" and strict CORS rules for module/crossorigin scripts.
+        // For archive-local assets, keep script loading in classic mode to preserve offline behavior.
+        $('script[src], link[href]').each((_, el) => {
+            const tag = String(el.tagName || '').toLowerCase();
+            const attr = tag === 'script' ? 'src' : 'href';
+            const ref = String($(el).attr(attr) || '').trim();
+            if (!ref) return;
+
+            const isLocalArchiveRef = ref.startsWith('../') || ref.startsWith('./') || ref.startsWith('..\\') || ref.startsWith('.\\');
+            if (!isLocalArchiveRef) return;
+
+            $(el).removeAttr('crossorigin');
+            $(el).removeAttr('integrity');
+            $(el).removeAttr('referrerpolicy');
+
+            if (tag === 'script' && String($(el).attr('type') || '').toLowerCase() === 'module') {
+                $(el).removeAttr('type');
+            }
+        });
+
         // Enable offline JSON-backed AJAX flows (load-more, category filters, etc.) on file://.
         if ($('#copilot-offline-ajax-bootstrap').length === 0) {
-            $('body').append(this.offlineAjaxBootstrapHtml());
+            if ($('head').length > 0) {
+                $('head').prepend(this.offlineAjaxBootstrapHtml());
+            } else {
+                $('body').append(this.offlineAjaxBootstrapHtml());
+            }
         }
 
         return $.html();
@@ -817,7 +927,6 @@ class PlaywrightCrawler {
 
     offlineAjaxBootstrapHtml() {
         return [
-            '<script src="../files/offline-ajax-map.js"></script>',
             '<script id="copilot-offline-ajax-bootstrap">',
             '(function(){',
             'var protocol=String(location.protocol||"").toLowerCase();',
@@ -825,7 +934,38 @@ class PlaywrightCrawler {
             'var isLocalHttp=(protocol==="http:"||protocol==="https:")&&(host==="localhost"||host==="127.0.0.1");',
             'if(protocol!=="file:"&&!isLocalHttp)return;',
             'var w=window;',
-            'var map=w.__OFFLINE_AJAX_MAP__||{};',
+            'function bindOfflineDropdownFallback(){',
+            'if(protocol!=="file:")return;',
+            'if(w.bootstrap&&typeof w.bootstrap.Dropdown==="function")return;',
+            'function closeAll(){',
+            'var opened=document.querySelectorAll(".dropdown-menu.show");',
+            'opened.forEach(function(menu){',
+            'menu.classList.remove("show");',
+            'var parent=menu.closest(".dropdown,.nav-item");',
+            'if(parent)parent.classList.remove("show");',
+            '});',
+            'var expanded=document.querySelectorAll("[data-toggle=\"dropdown\"],[data-bs-toggle=\"dropdown\"]");',
+            'expanded.forEach(function(toggle){toggle.setAttribute("aria-expanded","false");});',
+            '}',
+            'document.addEventListener("click",function(evt){',
+            'var toggle=evt.target&&evt.target.closest?evt.target.closest("[data-toggle=\"dropdown\"],[data-bs-toggle=\"dropdown\"]"):null;',
+            'if(!toggle){closeAll();return;}',
+            'evt.preventDefault();',
+            'evt.stopPropagation();',
+            'var parent=toggle.closest(".dropdown,.nav-item")||toggle.parentElement;',
+            'if(!parent)return;',
+            'var menu=parent.querySelector(".dropdown-menu");',
+            'if(!menu)return;',
+            'var willOpen=!menu.classList.contains("show");',
+            'closeAll();',
+            'if(willOpen){',
+            'menu.classList.add("show");',
+            'parent.classList.add("show");',
+            'toggle.setAttribute("aria-expanded","true");',
+            '}',
+            '},true);',
+            '}',
+            'bindOfflineDropdownFallback();',
             'function keyFromPath(pathValue){',
             'var path=String(pathValue||"").replace(/\\\\/g,"/");',
             'path=path.split("?")[0].split("#")[0];',
@@ -854,12 +994,25 @@ class PlaywrightCrawler {
             'function payloadFor(input){',
             'var key=keyFromUrl(input);',
             'if(!key)return null;',
+            'var map=w.__OFFLINE_AJAX_MAP__||{};',
             'return Object.prototype.hasOwnProperty.call(map,key)?map[key]:null;',
             '}',
             'function clonePayload(payload){',
             'if(payload===null||payload===undefined)return payload;',
             'return JSON.parse(JSON.stringify(payload));',
             '}',
+            // The AJAX payload map can be hundreds of KB for large sites, so it is loaded via
+            // a dynamically-injected script (non-blocking) instead of a blocking <script src>.
+            // The click listener below registers synchronously and awaits mapReady before
+            // acting, so a click landing before the map finishes loading is still caught
+            // instead of falling through to a real page navigation.
+            'var mapReady=new Promise(function(resolve){',
+            'var s=document.createElement("script");',
+            's.src="../files/offline-ajax-map.js";',
+            's.onload=function(){resolve();};',
+            's.onerror=function(){resolve();};',
+            'document.head.appendChild(s);',
+            '});',
             'if(typeof w.fetch==="function"){',
             'var nativeFetch=w.fetch.bind(w);',
             'w.fetch=function(input,init){',
@@ -939,17 +1092,15 @@ class PlaywrightCrawler {
             'return Promise.resolve(data);',
             '};',
             '}',
-            'function hasJQueryClickHandlers(el){',
-            'try{',
-            'if(!$||typeof $._data!=="function")return false;',
-            'var events=$._data(el,"events");',
-            'return !!(events&&events.click&&events.click.length);',
-            '}catch(e){return false;}',
-            '}',
             'function renderLoadMoreFallback(anchor,payload){',
             'if(!payload||typeof payload!=="object")return;',
             'if(typeof payload.html==="string"&&payload.html){',
-            'var container=document.querySelector(".gallery-page .gallery-items.grid")||document.querySelector(".gallery-list-widget.grid")||document.querySelector(".grid");',
+            'var scope=anchor&&anchor.closest?anchor.closest(".search_content_container,.widget-container,.container,.container-fluid"):null;',
+            'var container=(scope&&scope.querySelector(".articles-list-data-container-js"))',
+            '||document.querySelector(".articles-list-data-container-js")',
+            '||document.querySelector(".gallery-page .gallery-items.grid")',
+            '||document.querySelector(".gallery-list-widget.grid")',
+            '||document.querySelector(".grid");',
             'if(container)container.insertAdjacentHTML("beforeend",payload.html);',
             '}',
             'var nextUrl=(typeof payload.load_more_url==="string")?payload.load_more_url:"";',
@@ -957,18 +1108,29 @@ class PlaywrightCrawler {
             'if(!nextUrl){anchor.classList.add("hide-load-more");}else{anchor.classList.remove("hide-load-more");}',
             'anchor.classList.remove("disabled");',
             '}',
+            // Capture phase + stopImmediatePropagation gives us sole ownership of these
+            // anchors: we never rely on the page's own (possibly broken/unbound) click
+            // handler to also call preventDefault, which was the source of intermittent
+            // "click falls through to a real navigation" failures.
             'document.addEventListener("click",function(evt){',
             'var target=evt.target;',
             'if(!target||typeof target.closest!=="function")return;',
-            'var anchor=target.closest("a#load-more-gallery-items,a#load-more-galleries");',
+            'var anchor=target.closest("a#load-more-gallery-items,a#load-more-galleries,a#load-more-articles,a.load-more");',
             'if(!anchor)return;',
-            'var href=anchor.getAttribute("href")||anchor.href||"";',
-            'var payload=payloadFor(href);',
-            'if(payload===null)return;',
             'evt.preventDefault();',
-            'if(hasJQueryClickHandlers(anchor))return;',
+            'evt.stopImmediatePropagation();',
+            'if(anchor.classList.contains("disabled"))return;',
             'anchor.classList.add("disabled");',
+            'var href=anchor.getAttribute("href")||anchor.href||"";',
+            'mapReady.then(function(){',
+            'var payload=payloadFor(href);',
+            'if(payload===null){',
+            'anchor.classList.remove("disabled");',
+            'window.location.href=href;',
+            'return;',
+            '}',
             'renderLoadMoreFallback(anchor,clonePayload(payload));',
+            '});',
             '},true);',
             '})();',
             '</script>',
@@ -1197,6 +1359,48 @@ class PlaywrightCrawler {
         return archiveIndexFile;
     }
 
+    async applyOfflineCompatibilityPatches() {
+        const htmlFolder = path.join(this.options.outputDir, 'html');
+        const files = await fs.readdir(htmlFolder).catch(() => []);
+
+        for (const fileName of files) {
+            if (!String(fileName).toLowerCase().endsWith('.html')) continue;
+            const fullPath = path.join(htmlFolder, fileName);
+            const html = await fs.readFile(fullPath, 'utf8').catch(() => '');
+            if (!html) continue;
+
+            const $ = cheerio.load(html);
+
+            $('script[src], link[href]').each((_, el) => {
+                const tag = String(el.tagName || '').toLowerCase();
+                const attr = tag === 'script' ? 'src' : 'href';
+                const ref = String($(el).attr(attr) || '').trim();
+                if (!ref) return;
+
+                const isLocalArchiveRef = ref.startsWith('../') || ref.startsWith('./') || ref.startsWith('..\\') || ref.startsWith('.\\');
+                if (!isLocalArchiveRef) return;
+
+                $(el).removeAttr('crossorigin');
+                $(el).removeAttr('integrity');
+                $(el).removeAttr('referrerpolicy');
+
+                if (tag === 'script' && String($(el).attr('type') || '').toLowerCase() === 'module') {
+                    $(el).removeAttr('type');
+                }
+            });
+
+            if ($('#copilot-offline-ajax-bootstrap').length === 0) {
+                if ($('head').length > 0) {
+                    $('head').prepend(this.offlineAjaxBootstrapHtml());
+                } else {
+                    $('body').append(this.offlineAjaxBootstrapHtml());
+                }
+            }
+
+            await fs.writeFile(fullPath, $.html(), 'utf8');
+        }
+    }
+
     async buildAuditReport(startUrl) {
         const outputRoot = path.resolve(this.options.outputDir);
         const assetSelectors = [
@@ -1356,6 +1560,7 @@ function buildCrawlerOptions(input) {
         respectRobots: input.respectRobots,
         saveExternalAssets: input.saveExternalAssets,
         singlePage: input.singlePage,
+        auth: input.auth,
         userAgent: DEFAULT_UA[rand(0, DEFAULT_UA.length - 1)],
     };
 }
