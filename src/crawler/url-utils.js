@@ -138,6 +138,12 @@ function shouldSkipLinkForCrawl(urlString) {
 function getSkipReasonForCrawl(urlString) {
     try {
         const url = new URL(urlString);
+        const pathname = String(url.pathname || '').toLowerCase();
+
+        // Ignore API and timezone/address helper endpoints that explode crawl cardinality.
+        if (pathname.startsWith('/api/') || pathname === '/api') return 'non-content-endpoint';
+        if (pathname.startsWith('/address/') || pathname === '/address') return 'non-content-endpoint';
+
         if (hasTemplatePathSegment(url)) return 'template-path';
         if (hasInjectedHtmlMarkers(url)) return 'html-fragment-in-url';
         if (hasSuspiciousPathLength(url)) return 'suspicious-path-length';

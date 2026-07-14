@@ -529,6 +529,53 @@ class PlaywrightCrawler {
         return path.relative(htmlFolder, localPath).split(path.sep).join('/');
     }
 
+    resolveKnownSavedPageUrl(absoluteUrl, startUrl) {
+        const normalized = normalizeUrl(absoluteUrl);
+        if (this.pageMap.has(normalized)) return normalized;
+
+        let parsed;
+        try {
+            parsed = new URL(normalized);
+        } catch {
+            return null;
+        }
+        if (!isSameHost(startUrl, parsed.toString())) return null;
+
+        const pathname = parsed.pathname || '/';
+        const candidatePaths = [];
+
+        if (!pathname.startsWith('/ro/')) {
+            candidatePaths.push(`/ro${pathname === '/' ? '' : pathname}`);
+        } else {
+            candidatePaths.push(pathname.replace(/^\/ro\//, '/'));
+        }
+
+        for (const candidatePath of candidatePaths) {
+            try {
+                const candidateUrl = normalizeUrl(new URL(`${candidatePath}${parsed.search || ''}`, parsed.origin).toString());
+                if (this.pageMap.has(candidateUrl)) {
+                    return candidateUrl;
+                }
+            } catch {
+                // Ignore invalid candidate transformations.
+            }
+        }
+
+        return null;
+    }
+
+    isLikelyLocalExportRef(rawValue) {
+        const raw = String(rawValue || '').trim();
+        if (!raw) return false;
+
+        // Keep absolute web links eligible for rewriting.
+        if (/^(?:https?:)?\/\//i.test(raw)) return false;
+        // Leading slash usually means an origin-root website URL, not a local exported file.
+        if (raw.startsWith('/')) return false;
+
+        return /(?:^|\/)[^/?#]+\.(?:html?|css|js|png|jpe?g|gif|webp|svg|woff2?|ttf|otf|mp4|mp3|json)(?:[?#].*)?$/i.test(raw);
+    }
+
     normalizeInternalPageUrl(raw, currentUrl, startUrl) {
         const value = String(raw || '').trim();
         if (!value || /^(#|data:|mailto:|tel:|javascript:)/i.test(value)) return null;
@@ -591,6 +638,8 @@ class PlaywrightCrawler {
                 const raw = ($(el).attr(attr) || '').trim();
                 if (!raw || /^(#|data:|mailto:|tel:|javascript:)/i.test(raw)) return;
 
+                if (this.isLikelyLocalExportRef(raw)) return;
+
                 // Avoid double-rewriting links that already target local exported files.
                 if (/^(?:\.\.\/|\.\/|\/)?(?:en-)?article-[^/?#]+\.html(?:[?#].*)?$/i.test(raw)) return;
                 if (/^(?:\.\.\/|\.\/).*\.(?:html|css|js|png|jpe?g|gif|webp|svg|woff2?|ttf|otf|mp4|mp3|json)(?:[?#].*)?$/i.test(raw)) return;
@@ -599,6 +648,12 @@ class PlaywrightCrawler {
                 try {
                     absolute = normalizeUrl(new URL(raw, ajaxUrl).toString());
                 } catch {
+                    return;
+                }
+
+                const resolvedPageUrl = this.resolveKnownSavedPageUrl(absolute, startUrl);
+                if (resolvedPageUrl && this.pageMap.has(resolvedPageUrl)) {
+                    $(el).attr(attr, this.linkFromHtmlFolder(this.pageMap.get(resolvedPageUrl)));
                     return;
                 }
 
@@ -823,10 +878,18 @@ class PlaywrightCrawler {
                 if (!raw) return;
                 if (/^(data:|mailto:|tel:|javascript:|#)/i.test(raw)) return;
 
+                if (this.isLikelyLocalExportRef(raw)) return;
+
                 let absolute;
                 try {
                     absolute = normalizeUrl(new URL(raw, currentUrl).toString());
                 } catch {
+                    return;
+                }
+
+                const resolvedPageUrl = this.resolveKnownSavedPageUrl(absolute, startUrl);
+                if (resolvedPageUrl && this.pageMap.has(resolvedPageUrl)) {
+                    $(el).attr(attr, safeRelativeLink(currentHtmlPath, this.pageMap.get(resolvedPageUrl)));
                     return;
                 }
 
