@@ -5,6 +5,7 @@ const express = require('express');
 const archiver = require('archiver');
 
 const { JobManager } = require('./src/job-manager');
+const { parseSitemapUrls } = require('./src/crawler/sitemap');
 
 const app = express();
 const manager = new JobManager(path.join(__dirname, 'output-runs'));
@@ -209,7 +210,7 @@ function validateCrawlDelays(rawMin, rawMax) {
     return { valid: true, minDelay, maxDelay };
 }
 
-function parseAuthConfig(body) {
+function parseAuthConfig(body, defaultLoginUrl = '') {
     const authBody = body && typeof body.auth === 'object' && body.auth !== null ? body.auth : {};
     const enabled = toBoolean(body?.authEnabled) || toBoolean(authBody.enabled);
     if (!enabled) return { enabled: false };
@@ -217,7 +218,7 @@ function parseAuthConfig(body) {
     const username = normalizeText(body?.authUsername ?? authBody.username);
     const password = String(body?.authPassword ?? authBody.password ?? '');
     const loginUrlInput = normalizeText(body?.authLoginUrl ?? authBody.loginUrl);
-    const loginUrlRaw = loginUrlInput || normalizeText(body?.targetUrl);
+    const loginUrlRaw = loginUrlInput || normalizeText(body?.targetUrl) || normalizeText(defaultLoginUrl);
     const openModalSelector = normalizeText(body?.authOpenModalSelector ?? authBody.openModalSelector);
     const confirmSelector = normalizeText(body?.authConfirmSelector ?? authBody.confirmSelector);
     const usernameSelector = normalizeText(body?.authUsernameSelector ?? authBody.usernameSelector)
@@ -265,15 +266,71 @@ function parseAuthConfig(body) {
     };
 }
 
+function parseSourceMode(body) {
+    const raw = String(body?.sourceMode || 'url').trim().toLowerCase();
+    return raw === 'sitemap' ? 'sitemap' : 'url';
+}
+
+async function resolveSitemapInput(body, fallbackTargetUrl) {
+    const sitemapRaw = String(body?.sitemapUrl || '').trim();
+    if (!sitemapRaw) {
+        return { error: 'Pentru modul sitemap, sitemapUrl este obligatoriu.' };
+    }
+
+    let parsedSitemap;
+    try {
+        parsedSitemap = new URL(sitemapRaw);
+        if (!['http:', 'https:'].includes(parsedSitemap.protocol)) {
+            return { error: 'Sitemap URL trebuie sa fie http/https.' };
+        }
+    } catch (error) {
+        return { error: `Sitemap URL invalid: ${error.message}` };
+    }
+
+    const parsed = await parseSitemapUrls(parsedSitemap.toString(), {
+        maxSitemaps: 60,
+        maxUrls: 25000,
+        timeoutMs: 25000,
+        preferredHostUrl: fallbackTargetUrl,
+    });
+
+    if (!Array.isArray(parsed.urls) || parsed.urls.length === 0) {
+        return { error: 'Nu am gasit URL-uri de pagini in sitemap.' };
+    }
+
+    const normalizedTarget = fallbackTargetUrl
+        || parsed.urls[0]
+        || `${parsedSitemap.origin}/`;
+
+    return {
+        targetUrl: normalizedTarget,
+        seedUrls: parsed.urls,
+        sitemapUrl: parsed.sitemapUrl,
+        sitemapStats: parsed.stats,
+    };
+}
+
 function redactCrawlInput(input) {
     if (!input || typeof input !== 'object') return input;
-    if (!input.auth || typeof input.auth !== 'object') return input;
 
-    const redactedAuth = {
+    const redacted = { ...input };
+
+    if (Array.isArray(input.seedUrls)) {
+        redacted.seedUrlsCount = input.seedUrls.length;
+        delete redacted.seedUrls;
+    }
+    if (Array.isArray(input.sitemapUrls)) {
+        redacted.sitemapUrlsCount = input.sitemapUrls.length;
+        delete redacted.sitemapUrls;
+    }
+
+    if (!input.auth || typeof input.auth !== 'object') return redacted;
+
+    redacted.auth = {
         ...input.auth,
         password: input.auth.password ? '***' : '',
     };
-    return { ...input, auth: redactedAuth };
+    return redacted;
 }
 
 async function fileExists(filePath) {
@@ -533,14 +590,26 @@ app.post('/api/crawl', async (req, res) => {
     const body = req.body || {};
 
     try {
-        const targetUrl = String(body.targetUrl || '').trim();
-        if (!targetUrl) {
-            return res.status(400).json({ error: 'targetUrl este obligatoriu.' });
-        }
+        const sourceMode = parseSourceMode(body);
+        const targetUrlRaw = String(body.targetUrl || '').trim();
 
-        const parsed = new URL(targetUrl);
-        if (!['http:', 'https:'].includes(parsed.protocol)) {
-            return res.status(400).json({ error: 'Doar URL-uri http/https sunt permise.' });
+        let parsed;
+        let sitemapInput = null;
+
+        if (sourceMode === 'sitemap') {
+            sitemapInput = await resolveSitemapInput(body, targetUrlRaw || null);
+            if (sitemapInput.error) {
+                return res.status(400).json({ error: sitemapInput.error });
+            }
+            parsed = new URL(sitemapInput.targetUrl);
+        } else {
+            if (!targetUrlRaw) {
+                return res.status(400).json({ error: 'targetUrl este obligatoriu.' });
+            }
+            parsed = new URL(targetUrlRaw);
+            if (!['http:', 'https:'].includes(parsed.protocol)) {
+                return res.status(400).json({ error: 'Doar URL-uri http/https sunt permise.' });
+            }
         }
 
         const delays = validateCrawlDelays(body.delayMinMs, body.delayMaxMs);
@@ -549,12 +618,13 @@ app.post('/api/crawl', async (req, res) => {
         }
 
         const singlePageMode = toBoolean(body.singlePage);
-        const auth = parseAuthConfig(body);
+        const auth = parseAuthConfig(body, parsed.toString());
         if (auth.error) {
             return res.status(400).json({ error: auth.error });
         }
 
         const input = {
+            sourceMode,
             targetUrl: parsed.toString(),
             maxPages: singlePageMode ? 1 : Math.max(1, normalizeInteger(body.maxPages, 150)),
             maxDepth: singlePageMode ? 0 : Math.max(1, normalizeInteger(body.maxDepth, 3)),
@@ -563,6 +633,9 @@ app.post('/api/crawl', async (req, res) => {
             respectRobots: body.respectRobots !== false,
             saveExternalAssets: body.saveExternalAssets === true,
             singlePage: singlePageMode,
+            sitemapUrl: sitemapInput ? sitemapInput.sitemapUrl : '',
+            sitemapStats: sitemapInput ? sitemapInput.sitemapStats : null,
+            seedUrls: sitemapInput ? sitemapInput.seedUrls : null,
             auth,
         };
 
@@ -580,22 +653,35 @@ app.post('/api/dry-run', async (req, res) => {
     const body = req.body || {};
 
     try {
-        const targetUrl = String(body.targetUrl || '').trim();
-        if (!targetUrl) {
-            return res.status(400).json({ error: 'targetUrl este obligatoriu.' });
+        const sourceMode = parseSourceMode(body);
+        const targetUrlRaw = String(body.targetUrl || '').trim();
+
+        let parsed;
+        let sitemapInput = null;
+
+        if (sourceMode === 'sitemap') {
+            sitemapInput = await resolveSitemapInput(body, targetUrlRaw || null);
+            if (sitemapInput.error) {
+                return res.status(400).json({ error: sitemapInput.error });
+            }
+            parsed = new URL(sitemapInput.targetUrl);
+        } else {
+            if (!targetUrlRaw) {
+                return res.status(400).json({ error: 'targetUrl este obligatoriu.' });
+            }
+            parsed = new URL(targetUrlRaw);
+            if (!['http:', 'https:'].includes(parsed.protocol)) {
+                return res.status(400).json({ error: 'Doar URL-uri http/https sunt permise.' });
+            }
         }
 
-        const parsed = new URL(targetUrl);
-        if (!['http:', 'https:'].includes(parsed.protocol)) {
-            return res.status(400).json({ error: 'Doar URL-uri http/https sunt permise.' });
-        }
-
-        const auth = parseAuthConfig(body);
+        const auth = parseAuthConfig(body, parsed.toString());
         if (auth.error) {
             return res.status(400).json({ error: auth.error });
         }
 
         const input = {
+            sourceMode,
             targetUrl: parsed.toString(),
             maxPagesProbe: Math.max(30, normalizeInteger(body.maxPagesProbe, 180)),
             maxDepthProbe: Math.max(2, normalizeInteger(body.maxDepthProbe, 6)),
@@ -607,6 +693,9 @@ app.post('/api/dry-run', async (req, res) => {
             crawlDelayMaxMs: Math.max(1500, normalizeInteger(body.crawlDelayMaxMs, 1500)),
             respectRobots: body.respectRobots !== false,
             saveExternalAssets: false,
+            sitemapUrl: sitemapInput ? sitemapInput.sitemapUrl : '',
+            sitemapStats: sitemapInput ? sitemapInput.sitemapStats : null,
+            sitemapUrls: sitemapInput ? sitemapInput.seedUrls : null,
             auth,
         };
 

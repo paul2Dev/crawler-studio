@@ -460,8 +460,21 @@
 
             <form id="crawl-form">
                 <label>
+                    Mod sursa
+                    <select id="sourceMode">
+                        <option value="url" selected>URL website</option>
+                        <option value="sitemap">Sitemap URL</option>
+                    </select>
+                </label>
+
+                <label>
                     URL website
-                    <input id="targetUrl" type="url" placeholder="https://example.com" required />
+                    <input id="targetUrl" type="url" placeholder="https://example.com" />
+                </label>
+
+                <label id="sitemapUrlWrap" style="display:none;">
+                    Sitemap URL
+                    <input id="sitemapUrl" type="url" placeholder="https://example.com/sitemap.xml" />
                 </label>
 
                 <div class="grid">
@@ -562,6 +575,8 @@
         const notifyVolumeInput = document.getElementById('notifyVolume');
         const singlePageInput = document.getElementById('singlePage');
         const singlePageBadge = document.getElementById('singlePageBadge');
+        const sourceModeInput = document.getElementById('sourceMode');
+        const sitemapUrlWrap = document.getElementById('sitemapUrlWrap');
         const authEnabledInput = document.getElementById('authEnabled');
         const authFields = document.getElementById('authFields');
         const SOUND_PREF_KEY = 'crawlerStudio.notifySound';
@@ -623,7 +638,9 @@
 
         function payloadFromForm() {
             return {
+                sourceMode: sourceModeInput.value,
                 targetUrl: document.getElementById('targetUrl').value.trim(),
+                sitemapUrl: document.getElementById('sitemapUrl').value.trim(),
                 maxPages: Number(document.getElementById('maxPages').value),
                 maxDepth: Number(document.getElementById('maxDepth').value),
                 delayMinMs: Number(document.getElementById('delayMinMs').value),
@@ -647,6 +664,11 @@
 
         function syncAuthFields() {
             authFields.style.display = authEnabledInput.checked ? 'grid' : 'none';
+        }
+
+        function syncSourceModeFields() {
+            const isSitemap = sourceModeInput.value === 'sitemap';
+            sitemapUrlWrap.style.display = isSitemap ? 'block' : 'none';
         }
 
         function loadSoundPreference() {
@@ -818,6 +840,8 @@
 
         function renderDryStats(result) {
             const estimate = result.estimatedCrawlTime || {};
+            const sourceMode = result.sourceMode === 'sitemap' ? 'sitemap' : 'url';
+            const sitemapStats = result.sitemap && result.sitemap.stats ? result.sitemap.stats : null;
             const avgMin = Number.isFinite(estimate.avgSeconds)
                 ? Math.max(1, Math.round(estimate.avgSeconds / 60))
                 : '-';
@@ -835,8 +859,10 @@
                 `<table class="audit-table" aria-label="Rezultate dry run">` +
                 `<thead><tr><th>Indicator</th><th>Ce inseamna</th><th>Valoare</th></tr></thead>` +
                 `<tbody>` +
+                `<tr><td>Mod analiza</td><td>Sursa folosita pentru dry run.</td><td class="audit-count">${sourceMode}</td></tr>` +
                 `<tr><td>Pagini gasite</td><td>Numar total de pagini interne descoperite in scanarea rapida.</td><td class="audit-count">${result.pagesDiscovered}</td></tr>` +
                 `<tr><td>Max depth observat</td><td>Cel mai adanc nivel de navigare detectat din pagina de start.</td><td class="audit-count">${result.maxObservedDepth}</td></tr>` +
+                `${sitemapStats ? `<tr><td>Sitemaps procesate</td><td>Numar sitemap-uri citite (index + copii).</td><td class="audit-count">${sitemapStats.sitemapsProcessed}</td></tr>` : ''}` +
                 `<tr><td>Durata dry run</td><td>Timp efectiv consumat pentru scanarea rapida.</td><td class="audit-count">${dryRunSec} s</td></tr>` +
                 `<tr><td>Timp estimat crawl real</td><td>Estimare pentru crawl complet folosind delay-urile reale recomandate.</td><td class="audit-count">~${avgMin} min (${rangeMin})</td></tr>` +
                 `</tbody></table></div>` +
@@ -1314,6 +1340,16 @@
             resultEl.textContent = '';
             primeAudioContext();
 
+            if (payload.sourceMode === 'sitemap') {
+                if (!payload.sitemapUrl) {
+                    resultEl.textContent = 'Pentru modul sitemap, completeaza Sitemap URL.';
+                    return;
+                }
+            } else if (!payload.targetUrl) {
+                resultEl.textContent = 'targetUrl este obligatoriu in modul URL website.';
+                return;
+            }
+
             const delayError = validateCrawlDelays(payload.delayMinMs, payload.delayMaxMs);
             if (delayError) {
                 resultEl.textContent = delayError;
@@ -1337,11 +1373,23 @@
             dryStatsEl.style.display = 'none';
             resultEl.textContent = '';
 
+            if (base.sourceMode === 'sitemap') {
+                if (!base.sitemapUrl) {
+                    resultEl.textContent = 'Pentru modul sitemap, completeaza Sitemap URL.';
+                    return;
+                }
+            } else if (!base.targetUrl) {
+                resultEl.textContent = 'targetUrl este obligatoriu in modul URL website.';
+                return;
+            }
+
             const response = await fetch('/api/dry-run', {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({
+                    sourceMode: base.sourceMode,
                     targetUrl: base.targetUrl,
+                    sitemapUrl: base.sitemapUrl,
                     delayMinMs: 120,
                     delayMaxMs: 260,
                     crawlDelayMinMs: base.delayMinMs,
@@ -1400,6 +1448,7 @@
         });
 
         singlePageInput.addEventListener('change', syncSinglePageBadge);
+        sourceModeInput.addEventListener('change', syncSourceModeFields);
         authEnabledInput.addEventListener('change', syncAuthFields);
         logsEl.addEventListener('mousedown', () => bumpSelectionHold(3000));
         logsEl.addEventListener('mouseup', () => bumpSelectionHold(3000));
@@ -1414,6 +1463,7 @@
         });
 
         syncSinglePageBadge();
+        syncSourceModeFields();
         syncAuthFields();
         loadSoundPreference();
         refreshStatus();

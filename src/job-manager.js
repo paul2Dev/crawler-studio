@@ -19,15 +19,24 @@ async function writeRunLogFile(outputDir, logs) {
 
 function redactCrawlInput(input) {
     if (!input || typeof input !== 'object') return input;
-    if (!input.auth || typeof input.auth !== 'object') return input;
 
-    return {
-        ...input,
-        auth: {
-            ...input.auth,
-            password: input.auth.password ? '***' : '',
-        },
+    const redacted = { ...input };
+    if (Array.isArray(input.seedUrls)) {
+        redacted.seedUrlsCount = input.seedUrls.length;
+        delete redacted.seedUrls;
+    }
+    if (Array.isArray(input.sitemapUrls)) {
+        redacted.sitemapUrlsCount = input.sitemapUrls.length;
+        delete redacted.sitemapUrls;
+    }
+
+    if (!input.auth || typeof input.auth !== 'object') return redacted;
+
+    redacted.auth = {
+        ...input.auth,
+        password: input.auth.password ? '***' : '',
     };
+    return redacted;
 }
 
 class JobManager {
@@ -141,6 +150,63 @@ class JobManager {
         };
 
         this.currentJob = job;
+
+        const isSitemapMode = input && input.sourceMode === 'sitemap';
+        if (isSitemapMode) {
+            const urls = Array.isArray(input.sitemapUrls) ? input.sitemapUrls : [];
+            job.logs.push({
+                at: new Date().toISOString(),
+                level: 'info',
+                message: `Dry run sitemap: ${urls.length} URL-uri gasite in ${input.sitemapUrl || 'sitemap'}.`,
+            });
+
+            const pageOverheadMs = 1200;
+            const minPerPage = input.crawlDelayMinMs + pageOverheadMs;
+            const maxPerPage = input.crawlDelayMaxMs + pageOverheadMs;
+            const avgPerPage = Math.round((minPerPage + maxPerPage) / 2);
+            const minSeconds = Math.round((urls.length * minPerPage) / 1000);
+            const maxSeconds = Math.round((urls.length * maxPerPage) / 1000);
+            const avgSeconds = Math.round((urls.length * avgPerPage) / 1000);
+
+            const result = {
+                mode: 'dry-run',
+                sourceMode: 'sitemap',
+                analyzedStartUrl: input.targetUrl,
+                pagesVisited: 0,
+                pagesDiscovered: urls.length,
+                failedPages: 0,
+                maxObservedDepth: 1,
+                dryRunDurationMs: 0,
+                discoveredLinks: [...urls].sort((a, b) => a.localeCompare(b)),
+                sitemap: {
+                    url: input.sitemapUrl || '',
+                    stats: input.sitemapStats || null,
+                },
+                estimatedCrawlTime: {
+                    minSeconds,
+                    maxSeconds,
+                    avgSeconds,
+                    assumptions: {
+                        crawlDelayMinMs: input.crawlDelayMinMs,
+                        crawlDelayMaxMs: input.crawlDelayMaxMs,
+                        pageOverheadMs,
+                    },
+                },
+                recommendations: {
+                    maxDepth: Math.max(2, Math.min(12, Number(input.maxDepthProbe) || 8)),
+                    maxPages: Math.max(60, Math.ceil(urls.length * 1.1)),
+                },
+                probeLimits: {
+                    maxPagesProbe: input.maxPagesProbe,
+                    maxDepthProbe: input.maxDepthProbe,
+                },
+            };
+
+            job.status = 'completed';
+            job.finishedAt = new Date().toISOString();
+            job.result = result;
+            return job;
+        }
 
         const options = buildProfilerOptions(input);
         const profiler = new SiteProfiler(options, (entry) => {

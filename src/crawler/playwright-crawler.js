@@ -117,6 +117,8 @@ class PlaywrightCrawler {
             domAssetDirectConcurrency: 6,
             directAssetTimeoutMs: 6000,
             auth: { enabled: false },
+            seedUrls: null,
+            crawlFromSitemap: false,
             ...options,
         };
         this.onProgress = onProgress;
@@ -209,8 +211,21 @@ class PlaywrightCrawler {
 
         await this.authenticateIfNeeded(startUrl);
 
-        const queue = [{ url: startUrl, depth: 0 }];
-        let ajaxExpansionDone = this.options.singlePage;
+        const initialSeedUrls = Array.isArray(this.options.seedUrls)
+            ? this.options.seedUrls
+                .map((url) => {
+                    try {
+                        return normalizeUrl(url);
+                    } catch {
+                        return null;
+                    }
+                })
+                .filter(Boolean)
+            : [];
+        const queue = initialSeedUrls.length
+            ? initialSeedUrls.map((url) => ({ url, depth: 0 }))
+            : [{ url: startUrl, depth: 0 }];
+        let ajaxExpansionDone = this.options.singlePage || this.options.crawlFromSitemap;
 
         try {
             while ((queue.length || !ajaxExpansionDone) && this.visited.size < this.options.maxPages) {
@@ -328,7 +343,7 @@ class PlaywrightCrawler {
                     const rewritten = this.rewriteHtml(html, currentUrl, htmlPath, responseAssets, startUrl);
                     await fs.writeFile(htmlPath, rewritten, 'utf8');
 
-                    if (!this.options.singlePage) {
+                    if (!this.options.singlePage && !this.options.crawlFromSitemap) {
                         const links = this.extractLinks(html, currentUrl, startUrl);
                         this.enqueueDiscoveredLinks(queue, links, current.depth + 1);
 
@@ -1623,6 +1638,8 @@ function buildCrawlerOptions(input) {
         respectRobots: input.respectRobots,
         saveExternalAssets: input.saveExternalAssets,
         singlePage: input.singlePage,
+        seedUrls: input.seedUrls,
+        crawlFromSitemap: input.sourceMode === 'sitemap',
         auth: input.auth,
         userAgent: DEFAULT_UA[rand(0, DEFAULT_UA.length - 1)],
     };
